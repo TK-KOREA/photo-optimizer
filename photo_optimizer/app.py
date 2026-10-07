@@ -17,16 +17,16 @@ from starlette.concurrency import run_in_threadpool
 
 from .core import Options, convert
 
-MAX_UPLOAD_MB = int(os.environ.get("PHOTOSHRINK_MAX_UPLOAD_MB", "120"))
+MAX_UPLOAD_MB = int(os.environ.get("PHOTO_OPTIMIZER_MAX_UPLOAD_MB", "120"))
 # 2억 화소 1장 처리에 약 0.9GB를 쓰므로 동시 처리 수를 제한한다
-MAX_JOBS = int(os.environ.get("PHOTOSHRINK_MAX_JOBS", "2"))
+MAX_JOBS = int(os.environ.get("PHOTO_OPTIMIZER_MAX_JOBS", "2"))
 KEEP_SECONDS = 60 * 60  # 결과 파일 보관 시간
 
-OUT_DIR = Path(tempfile.gettempdir()) / "photoshrink"
+OUT_DIR = Path(tempfile.gettempdir()) / "photo-optimizer"
 OUT_DIR.mkdir(exist_ok=True)
 STATIC_DIR = Path(__file__).parent / "static"
 
-app = FastAPI(title="PhotoShrink")
+app = FastAPI(title="Photo Optimizer")
 _jobs = asyncio.Semaphore(MAX_JOBS)
 _names: dict[str, str] = {}  # 결과 id → 다운로드 파일명
 
@@ -41,7 +41,7 @@ def _cleanup() -> None:
 
 def _out_name(src: str) -> str:
     stem = Path(src or "photo").stem
-    return f"{stem}_shrink.jpg"
+    return f"{stem}_optimized.jpg"
 
 
 @app.post("/api/convert")
@@ -102,7 +102,7 @@ def api_zip(ids: str):
             z.write(_path(job_id), name)
     mem.seek(0)
     return StreamingResponse(mem, media_type="application/zip",
-                             headers={"Content-Disposition": 'attachment; filename="photoshrink.zip"'})
+                             headers={"Content-Disposition": 'attachment; filename="photo-optimizer.zip"'})
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

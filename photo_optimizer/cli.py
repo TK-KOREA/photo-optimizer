@@ -1,7 +1,7 @@
 """명령줄 일괄 변환.
 
-  python -m photoshrink.cli 사진폴더 -o 결과폴더
-  python -m photoshrink.cli a.jpg b.jpg --min 5 --max 10
+  python -m photo_optimizer.cli 사진폴더 -o 결과폴더
+  python -m photo_optimizer.cli a.jpg b.jpg --min 5 --max 10
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def main() -> None:
     for f in files:
         out_dir = a.out or f.parent
         out_dir.mkdir(parents=True, exist_ok=True)
-        dst = out_dir / f"{f.stem}_shrink.jpg"
+        dst = out_dir / f"{f.stem}_optimized.jpg"
         try:
             buf, r = convert(f.read_bytes(), opts)
         except Exception as e:

@@ -11,7 +11,7 @@ import webbrowser
 
 import uvicorn
 
-from photoshrink.app import app
+from photo_optimizer.app import app
 
 
 def _free_port() -> int:
@@ -32,14 +32,14 @@ def main() -> None:
         import webview
     except ImportError:
         webbrowser.open(url)
-        print(f"PhotoShrink 실행 중: {url}  (종료하려면 Ctrl+C)")
+        print(f"Photo Optimizer 실행 중: {url}  (종료하려면 Ctrl+C)")
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
     else:
-        webview.create_window("PhotoShrink", url, width=860, height=760)
+        webview.create_window("Photo Optimizer", url, width=860, height=760)
         webview.start()
     server.should_exit = True
 
