@@ -1,0 +1,6 @@
+pyvips[binary]>=3.0
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+# PC 프로그램 독립 창 (선택, 없으면 기본 브라우저로 열림)
+pywebview>=5.0

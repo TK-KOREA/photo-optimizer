@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhotoShrink</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #fff; --text: #1d1d1f; --sub: #6e6e73; --line: #e3e3e0;
+    --accent: #0a66d8; --accent-soft: #e8f0fc; --ok: #1f8a4c; --warn: #b26a00; --err: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161617; --card: #1f1f21; --text: #f2f2f2; --sub: #9a9aa0; --line: #333336;
+      --accent: #5aa0ff; --accent-soft: #1d2a3d; --ok: #4cc283; --warn: #f0a640; --err: #ff6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 "Pretendard", "Malgun Gothic", system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .lead { color: var(--sub); margin: 0 0 28px; }
+  .drop { border: 2px dashed var(--line); border-radius: 16px; background: var(--card);
+          padding: 44px 16px; text-align: center; cursor: pointer; transition: .15s; }
+  .drop:hover, .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  .drop strong { display: block; font-size: 17px; margin-bottom: 4px; }
+  .drop span { color: var(--sub); font-size: 14px; }
+  .opts { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center;
+          margin: 18px 4px 28px; color: var(--sub); font-size: 14px; }
+  .opts input[type=number] { width: 58px; padding: 4px 6px; border: 1px solid var(--line);
+          border-radius: 6px; background: var(--card); color: var(--text); font: inherit; }
+  .opts label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+  li { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .row { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+  .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta { color: var(--sub); font-size: 13px; margin-top: 4px; }
+  .meta b { color: var(--text); font-weight: 600; }
+  .note { color: var(--warn); font-size: 13px; margin-top: 4px; }
+  .err { color: var(--err); font-size: 13px; margin-top: 4px; }
+  .bar { height: 4px; background: var(--line); border-radius: 2px; margin-top: 10px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .bar.busy i { width: 40%; animation: slide 1.2s infinite ease-in-out; }
+  @keyframes slide { from { margin-left: -40%; } to { margin-left: 100%; } }
+  a.btn, button.btn { flex: none; border: 0; border-radius: 8px; padding: 7px 14px; font: inherit;
+          font-size: 14px; font-weight: 600; background: var(--accent); color: #fff;
+          text-decoration: none; cursor: pointer; }
+  .all { margin-top: 16px; text-align: right; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>PhotoShrink</h1>
+  <p class="lead">2억 화소 사진을 보관·공유하기 좋은 크기로 줄입니다. 눈에 띄는 화질 차이 없이 용량만 줄어듭니다.</p>
+
+  <div class="drop" id="drop">
+    <strong>사진을 여기에 끌어다 놓으세요</strong>
+    <span>또는 클릭해서 선택 · JPEG, HEIF, PNG, WebP · 여러 장 가능</span>
+    <input type="file" id="pick" accept="image/*,.heic,.heif" multiple hidden>
+  </div>
+
+  <div class="opts">
+    <span>목표 용량
+      <input type="number" id="minMb" value="5" min="0.5" max="49" step="0.5"> –
+      <input type="number" id="maxMb" value="10" min="1" max="50" step="0.5"> MB</span>
+    <label><input type="checkbox" id="sharpen"> 선명하게 보정</label>
+    <label><input type="checkbox" id="keepGps"> 촬영 위치 정보 유지</label>
+  </div>
+
+  <ul id="list"></ul>
+  <div class="all hidden" id="allWrap"><a class="btn" id="allBtn">모두 받기 (ZIP)</a></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const drop = $("drop"), pick = $("pick"), list = $("list");
+const done = [];
+let queue = Promise.resolve();
+
+drop.onclick = () => pick.click();
+pick.onchange = () => { addFiles(pick.files); pick.value = ""; };
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); addFiles(e.dataTransfer.files); };
+
+const mb = n => (n / 1048576).toFixed(1) + "MB";
+const esc = s => s.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function addFiles(files) {
+  for (const f of files) {
+    const li = document.createElement("li");
+    li.innerHTML = `<div class="row"><div style="min-width:0">
+        <div class="name">${esc(f.name)}</div>
+        <div class="meta">${mb(f.size)} · 대기 중</div></div></div>
+      <div class="bar"><i></i></div>`;
+    list.append(li);
+    // 서버 메모리 보호를 위해 한 장씩 순서대로 처리
+    queue = queue.then(() => run(f, li));
+  }
+}
+
+function run(file, li) {
+  const meta = li.querySelector(".meta"), bar = li.querySelector(".bar"), fill = bar.firstElementChild;
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("min_mb", $("minMb").value);
+  fd.append("max_mb", $("maxMb").value);
+  fd.append("sharpen", $("sharpen").checked);
+  fd.append("keep_gps", $("keepGps").checked);
+
+  return new Promise(resolve => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/convert");
+    xhr.responseType = "json";
+    xhr.upload.onprogress = e => {
+      fill.style.width = (e.loaded / e.total * 100) + "%";
+      meta.textContent = `${mb(file.size)} · 올리는 중`;
+    };
+    xhr.upload.onload = () => {
+      fill.style.width = ""; bar.classList.add("busy");
+      meta.textContent = `${mb(file.size)} · 최적 크기 찾는 중 (20초 내외)`;
+    };
+    xhr.onload = () => {
+      bar.remove();
+      const r = xhr.response || {};
+      if (xhr.status !== 200) {
+        meta.insertAdjacentHTML("afterend", `<div class="err">${esc(r.detail || "변환에 실패했습니다.")}</div>`);
+        meta.textContent = mb(file.size);
+        return resolve();
+      }
+      meta.innerHTML = `${r.src_megapixels}MP → <b>${r.megapixels}MP</b> (${r.width}×${r.height}) · `
+        + `${r.src_size_mb}MB → <b>${r.size_mb}MB</b> · 품질 ${r.quality} · ${r.saved_pct}% 절감`;
+      if (r.note) meta.insertAdjacentHTML("afterend", `<div class="note">${esc(r.note)}</div>`);
+      li.firstElementChild.insertAdjacentHTML("beforeend",
+        `<a class="btn" href="/api/download/${r.id}" download="${esc(r.filename)}">받기</a>`);
+      done.push(r.id);
+      $("allWrap").classList.toggle("hidden", done.length < 2);
+      $("allBtn").href = "/api/zip?ids=" + done.join(",");
+      resolve();
+    };
+    xhr.onerror = () => {
+      bar.remove();
+      meta.insertAdjacentHTML("afterend", `<div class="err">서버에 연결할 수 없습니다.</div>`);
+      resolve();
+    };
+    xhr.send(fd);
+  });
+}
+</script>
+</body>
+</html>
