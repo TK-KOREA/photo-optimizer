@@ -33,6 +33,16 @@ python -m photo_optimizer.desktop
 python -m photo_optimizer.cli D:\사진 -o D:\사진_축소
 ```
 
+브라우저 전용 버전 (`photo_optimizer/docs`, 서버 없이 사진을 기기 안에서 변환):
+
+https://tk-korea.github.io/photo-optimizer/
+
+같은 libvips를 WebAssembly로 빌드한 [wasm-vips](https://github.com/kleisauke/wasm-vips)로 위와 같은 방식으로 변환합니다. `main`에 푸시하면 GitHub Actions가 Pages로 배포합니다. HEIC는 지원하지 않습니다. 로컬에서 확인하려면:
+
+```bash
+python -m http.server 8000 --directory photo_optimizer/docs
+```
+
 ## 환경 변수 (웹 서비스)
 
 | 이름 | 기본값 | 설명 |

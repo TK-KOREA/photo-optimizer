@@ -1,0 +1,32 @@
+# 브라우저 전용 버전(photo_optimizer/docs)을 GitHub Pages로 배포한다.
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["photo_optimizer/docs/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: photo_optimizer/docs
+      - id: deployment
+        uses: actions/deploy-pages@v4
