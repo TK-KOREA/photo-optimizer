@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from .core import Options, convert
+from .core import DEFAULT_TARGET_MB, Options, convert, target_range
 
 MAX_UPLOAD_MB = int(os.environ.get("PHOTO_OPTIMIZER_MAX_UPLOAD_MB", "120"))
 # 2억 화소 1장 처리에 약 0.9GB를 쓰므로 동시 처리 수를 제한한다
@@ -47,13 +47,13 @@ def _out_name(src: str) -> str:
 @app.post("/api/convert")
 async def api_convert(
     file: UploadFile = File(...),
-    min_mb: float = Form(5.0),
-    max_mb: float = Form(10.0),
+    target_mb: float = Form(DEFAULT_TARGET_MB),
     sharpen: bool = Form(False),
     keep_gps: bool = Form(False),
 ):
-    if not (0.5 <= min_mb < max_mb <= 50):
-        raise HTTPException(400, "목표 용량 범위가 올바르지 않습니다.")
+    if not (1 <= target_mb <= 47):
+        raise HTTPException(400, "목표 용량은 1~47MB 사이로 정해 주세요.")
+    min_mb, max_mb = target_range(target_mb)
     data = await file.read(MAX_UPLOAD_MB * 1024 * 1024 + 1)
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(413, f"{MAX_UPLOAD_MB}MB 이하 파일만 올릴 수 있습니다.")

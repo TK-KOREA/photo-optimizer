@@ -1,6 +1,6 @@
 """고해상도 사진 축소 변환 코어.
 
-목표 용량 범위(기본 5~10MB) 안에서 가능한 한 높은 해상도와 품질을 남긴다.
+목표 용량(기본 7MB, ±3MB 허용) 안에서 가능한 한 높은 해상도와 품질을 남긴다.
   1. 해상도는 원본의 1/2(2억 → 5천만 화소)부터 시도한다.
   2. 각 해상도에서 JPEG 품질(Q)을 이진 탐색해 상한 용량 이하의 최고 Q를 찾는다.
   3. 최저 Q(min_q)로도 상한을 넘으면 해상도를 한 단계 낮춘다.
@@ -13,15 +13,22 @@ from dataclasses import dataclass, asdict, field
 import pyvips
 
 MB = 1024 * 1024
+DEFAULT_TARGET_MB = 7.0
+TOLERANCE_MB = 3.0  # 목표 용량 ± 이 값까지 허용
 
 # 시도할 축소 배율 (가로/세로 기준). 0.5 = 면적 1/4 = 2억 → 5천만 화소
 SCALE_STEPS = (0.5, 0.45, 0.4, 0.35, 0.3, 0.25)
 
 
+def target_range(target_mb: float) -> tuple[float, float]:
+    """목표 용량 하나를 허용 범위(하한, 상한)로 바꾼다."""
+    return max(0.5, target_mb - TOLERANCE_MB), target_mb + TOLERANCE_MB
+
+
 @dataclass
 class Options:
-    min_mb: float = 5.0
-    max_mb: float = 10.0
+    min_mb: float = DEFAULT_TARGET_MB - TOLERANCE_MB
+    max_mb: float = DEFAULT_TARGET_MB + TOLERANCE_MB
     min_q: int = 85          # 이 아래로는 품질을 낮추지 않고 해상도를 줄인다
     max_q: int = 95
     max_scale: float = 0.5   # 원본 대비 최대 배율 (1.0이면 축소 안 함부터 시도)
@@ -144,7 +151,7 @@ def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
     if found:
         q, buf = found
         if len(buf) < opts.min_mb * MB:
-            note = "최고 품질로도 목표 하한보다 작습니다 (원본 정보량이 적은 사진)"
+            note = "최고 품질로도 목표보다 3MB 넘게 작습니다 (원본 정보량이 적은 사진)"
     else:
         # 최소 배율에서도 상한 초과: 최소 배율 + 최저 Q로 저장
         q, buf = opts.min_q, _encode(img, opts.min_q)

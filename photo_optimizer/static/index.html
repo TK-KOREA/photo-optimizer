@@ -28,6 +28,7 @@
   .drop span { color: var(--sub); font-size: 14px; }
   .opts { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center;
           margin: 18px 4px 28px; color: var(--sub); font-size: 14px; }
+  .opts small { color: var(--sub); font-size: 13px; }
   .opts input[type=number] { width: 58px; padding: 4px 6px; border: 1px solid var(--line);
           border-radius: 6px; background: var(--card); color: var(--text); font: inherit; }
   .opts label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
@@ -63,8 +64,8 @@
 
   <div class="opts">
     <span>목표 용량
-      <input type="number" id="minMb" value="5" min="0.5" max="49" step="0.5"> –
-      <input type="number" id="maxMb" value="10" min="1" max="50" step="0.5"> MB</span>
+      <input type="number" id="targetMb" value="7" min="1" max="47" step="1"> MB
+      <small id="targetRange">(4–10MB 안에서 맞춤)</small></span>
     <label><input type="checkbox" id="sharpen"> 선명하게 보정</label>
     <label><input type="checkbox" id="keepGps"> 촬영 위치 정보 유지</label>
   </div>
@@ -78,6 +79,14 @@ const $ = id => document.getElementById(id);
 const drop = $("drop"), pick = $("pick"), list = $("list");
 const done = [];
 let queue = Promise.resolve();
+
+// 목표 용량 하나에 ±3MB 오차를 허용한다
+const TOL = 3;
+const showRange = () => {
+  const t = +$("targetMb").value;
+  $("targetRange").textContent = t >= 1 && t <= 47 ? `(${Math.max(0.5, t - TOL)}–${t + TOL}MB 안에서 맞춤)` : "(1~47MB)";
+};
+$("targetMb").oninput = showRange;
 
 drop.onclick = () => pick.click();
 pick.onchange = () => { addFiles(pick.files); pick.value = ""; };
@@ -105,8 +114,7 @@ function run(file, li) {
   const meta = li.querySelector(".meta"), bar = li.querySelector(".bar"), fill = bar.firstElementChild;
   const fd = new FormData();
   fd.append("file", file);
-  fd.append("min_mb", $("minMb").value);
-  fd.append("max_mb", $("maxMb").value);
+  fd.append("target_mb", $("targetMb").value);
   fd.append("sharpen", $("sharpen").checked);
   fd.append("keep_gps", $("keepGps").checked);
 

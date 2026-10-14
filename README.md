@@ -1,11 +1,11 @@
 # Photo Optimizer
 
-2억 화소 사진(30~50MB)을 보관·공유용 **5~10MB**로 줄이는 변환기. 웹 서비스와 PC 프로그램이 같은 코드를 씁니다.
+2억 화소 사진(30~50MB)을 보관·공유용 **7MB 안팎(±3MB)**으로 줄이는 변환기. 웹 서비스와 PC 프로그램이 같은 코드를 씁니다.
 
 ## 동작 방식
 
 1. EXIF 회전 반영 → 선형 광 공간에서 Lanczos3 축소 (기본: 2억 → 5천만 화소)
-2. JPEG 품질 85~95 사이를 이진 탐색해 **목표 상한 이하 최고 품질** 선택
+2. 목표 용량 하나(기본 7MB)에 ±3MB 오차를 허용하고, JPEG 품질 85~95 사이를 이진 탐색해 **상한(목표+3MB) 이하 최고 품질** 선택
 3. 품질 85로도 상한을 넘으면 해상도를 한 단계씩 낮춤 (0.5 → 0.45 → … → 0.25배)
 4. 4:4:4 크로마, mozjpeg 최적화, EXIF·ICC·XMP 보존, GPS는 기본 제거
 
@@ -30,7 +30,7 @@ python -m photo_optimizer.desktop
 폴더 일괄 변환:
 
 ```bash
-python -m photo_optimizer.cli D:\사진 -o D:\사진_축소
+python -m photo_optimizer.cli D:\사진 -o D:\사진_축소 --target 7
 ```
 
 브라우저 전용 버전 (`photo_optimizer/docs`, 서버 없이 사진을 기기 안에서 변환):
