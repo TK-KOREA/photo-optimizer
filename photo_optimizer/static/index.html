@@ -32,6 +32,11 @@
   .opts input[type=number] { width: 58px; padding: 4px 6px; border: 1px solid var(--line);
           border-radius: 6px; background: var(--card); color: var(--text); font: inherit; }
   .opts label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  .presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 4px 0; }
+  .presets label { display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border: 1px solid var(--line);
+          border-radius: 999px; background: var(--card); font-size: 14px; cursor: pointer; }
+  .presets label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .presets input[type=radio] { margin: 0; accent-color: var(--accent); }
   ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
   li { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
   .row { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
@@ -62,8 +67,9 @@
     <input type="file" id="pick" accept="image/*,.heic,.heif" multiple hidden>
   </div>
 
+  <div class="presets" id="presets" role="radiogroup" aria-label="용도"></div>
   <div class="opts">
-    <span>목표 용량
+    <span id="customBox" hidden>목표 용량
       <input type="number" id="targetMb" value="7" min="1" max="47" step="1"> MB
       <small id="targetRange">(4–10MB 안에서 맞춤)</small></span>
     <label><input type="checkbox" id="sharpen"> 선명하게 보정</label>
@@ -88,6 +94,15 @@ const showRange = () => {
 };
 $("targetMb").oninput = showRange;
 
+// 용도 프리셋: 목록은 서버(core.PRESETS)에서 받는다
+const preset = () => document.querySelector('input[name="preset"]:checked')?.value || "archive";
+fetch("/api/presets").then(r => r.json()).then(({ default: def, presets }) => {
+  const opts = [...Object.entries(presets).map(([k, p]) => [k, p.label]), ["custom", "직접 설정"]];
+  $("presets").innerHTML = opts.map(([k, label]) =>
+    `<label><input type="radio" name="preset" value="${k}"${k === def ? " checked" : ""}> ${esc(label)}</label>`).join("");
+  $("presets").onchange = () => { $("customBox").hidden = preset() !== "custom"; };
+});
+
 drop.onclick = () => pick.click();
 pick.onchange = () => { addFiles(pick.files); pick.value = ""; };
 drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
@@ -98,6 +113,8 @@ const mb = n => (n / 1048576).toFixed(1) + "MB";
 const esc = s => s.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 function addFiles(files) {
+  // 넣는 순간의 설정을 사진마다 고정한다 (대기 중에 설정을 바꿔도 이미 넣은 사진은 그대로)
+  const settings = { preset: preset(), target_mb: $("targetMb").value, sharpen: $("sharpen").checked, keep_gps: $("keepGps").checked };
   for (const f of files) {
     const li = document.createElement("li");
     li.innerHTML = `<div class="row"><div style="min-width:0">
@@ -106,17 +123,15 @@ function addFiles(files) {
       <div class="bar"><i></i></div>`;
     list.append(li);
     // 서버 메모리 보호를 위해 한 장씩 순서대로 처리
-    queue = queue.then(() => run(f, li));
+    queue = queue.then(() => run(f, li, settings));
   }
 }
 
-function run(file, li) {
+function run(file, li, settings) {
   const meta = li.querySelector(".meta"), bar = li.querySelector(".bar"), fill = bar.firstElementChild;
   const fd = new FormData();
   fd.append("file", file);
-  fd.append("target_mb", $("targetMb").value);
-  fd.append("sharpen", $("sharpen").checked);
-  fd.append("keep_gps", $("keepGps").checked);
+  for (const [k, v] of Object.entries(settings)) fd.append(k, v);
 
   return new Promise(resolve => {
     const xhr = new XMLHttpRequest();
@@ -138,10 +153,10 @@ function run(file, li) {
         meta.textContent = mb(file.size);
         return resolve();
       }
-      meta.innerHTML = r.kept
+      meta.innerHTML = `${esc(r.preset_label)} · ` + (r.kept
         ? `${r.megapixels}MP (${r.width}×${r.height}) · <b>${r.size_mb}MB</b> · 원본 그대로`
         : `${r.src_megapixels}MP → <b>${r.megapixels}MP</b> (${r.width}×${r.height}) · `
-          + `${r.src_size_mb}MB → <b>${r.size_mb}MB</b> · 품질 ${r.quality} · ${r.saved_pct}% 절감`;
+          + `${r.src_size_mb}MB → <b>${r.size_mb}MB</b> · 품질 ${r.quality} · ${r.saved_pct}% 절감`);
       if (r.note) meta.insertAdjacentHTML("afterend", `<div class="note">${esc(r.note)}</div>`);
       li.firstElementChild.insertAdjacentHTML("beforeend",
         `<a class="btn" href="/api/download/${r.id}" download="${esc(r.filename)}">받기</a>`);

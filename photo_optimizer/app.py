@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from .core import DEFAULT_TARGET_MB, Options, convert, target_range
+from .core import DEFAULT_PRESET, DEFAULT_TARGET_MB, PRESETS, convert, preset_options
 
 MAX_UPLOAD_MB = int(os.environ.get("PHOTO_OPTIMIZER_MAX_UPLOAD_MB", "120"))
 # 2억 화소 1장 처리에 약 0.9GB를 쓰므로 동시 처리 수를 제한한다
@@ -44,21 +44,29 @@ def _out_name(src: str) -> str:
     return f"{stem}_optimized.jpg"
 
 
+@app.get("/api/presets")
+def api_presets():
+    """화면이 프리셋 버튼을 만들 때 쓰는 목록 (core.PRESETS 그대로)."""
+    return {"default": DEFAULT_PRESET, "presets": PRESETS}
+
+
 @app.post("/api/convert")
 async def api_convert(
     file: UploadFile = File(...),
-    target_mb: float = Form(DEFAULT_TARGET_MB),
+    preset: str = Form(DEFAULT_PRESET),          # original | archive | messenger | mail | custom
+    target_mb: float = Form(DEFAULT_TARGET_MB),  # preset=custom일 때만 쓴다
     sharpen: bool = Form(False),
     keep_gps: bool = Form(False),
 ):
-    if not (1 <= target_mb <= 47):
+    if preset != "custom" and preset not in PRESETS:
+        raise HTTPException(400, "알 수 없는 용도입니다.")
+    if preset == "custom" and not (1 <= target_mb <= 47):
         raise HTTPException(400, "목표 용량은 1~47MB 사이로 정해 주세요.")
-    min_mb, max_mb = target_range(target_mb)
     data = await file.read(MAX_UPLOAD_MB * 1024 * 1024 + 1)
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(413, f"{MAX_UPLOAD_MB}MB 이하 파일만 올릴 수 있습니다.")
 
-    opts = Options(min_mb=min_mb, max_mb=max_mb, sharpen=sharpen, keep_gps=keep_gps)
+    opts = preset_options(preset, target_mb, sharpen=sharpen, keep_gps=keep_gps)
     async with _jobs:
         try:
             buf, result = await run_in_threadpool(convert, data, opts)
@@ -70,7 +78,8 @@ async def api_convert(
     (OUT_DIR / f"{job_id}.jpg").write_bytes(buf)
     _names[job_id] = _out_name(file.filename)
     d = result.to_dict()
-    d.update(id=job_id, filename=_names[job_id])
+    d.update(id=job_id, filename=_names[job_id],
+             preset_label=PRESETS[preset]["label"] if preset in PRESETS else f"직접 설정 {target_mb:g}MB")
     return d
 
 

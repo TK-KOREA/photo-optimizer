@@ -1,10 +1,17 @@
 """고해상도 사진 축소 변환 코어.
 
-목표 용량(기본 7MB, ±3MB 허용) 안에서 가능한 한 높은 해상도와 품질을 남긴다.
+용도 프리셋으로 동작한다 (브라우저판 docs/app.js의 PRESETS와 같은 값).
+  원본 해상도   해상도 그대로 다시 저장해 용량만 줄인다
+  고화질 보관   목표 용량(7MB, ±3MB 허용) 안에서 가능한 한 높은 해상도와 품질 (기본)
+  카톡·메신저   긴 변 4000px, 4MB 이하
+  메일 첨부     긴 변 3000px, 2MB 이하
+  직접 설정     목표 용량 하나(±3MB)
+목표 용량 방식은 이렇게 찾는다.
   1. 해상도는 원본의 1/2(2억 → 5천만 화소)부터 시도한다.
   2. 각 해상도에서 JPEG 품질(Q)을 이진 탐색해 상한 용량 이하의 최고 Q를 찾는다.
   3. 최저 Q(min_q)로도 상한을 넘으면 해상도를 한 단계 낮춘다.
 이미 상한 안의 JPEG는 다시 압축하지 않는다(해상도만 잃거나 오히려 커진다). 위치 정보만 지운다.
+결과가 원본 JPEG보다 크면 원본을 그대로 쓴다.
 """
 from __future__ import annotations
 
@@ -23,6 +30,17 @@ TOLERANCE_MB = 3.0  # 목표 용량 ± 이 값까지 허용
 SCALE_STEPS = (0.5, 0.45, 0.4, 0.35, 0.3, 0.25)
 
 
+# mode: size = 목표 용량(±3MB), edge = 긴 변 상한 + 용량 상한, original = 해상도 그대로 다시 저장
+PRESETS = {
+    "original":  {"label": "원본 해상도", "mode": "original"},
+    "archive":   {"label": "고화질 보관", "mode": "size", "target_mb": 7.0},
+    "messenger": {"label": "카톡·메신저", "mode": "edge", "long_edge": 4000, "max_mb": 4.0},
+    "mail":      {"label": "메일 첨부", "mode": "edge", "long_edge": 3000, "max_mb": 2.0},
+}
+DEFAULT_PRESET = "archive"
+REENCODE_Q = 88  # 원본 해상도 프리셋의 JPEG 품질
+
+
 def target_range(target_mb: float) -> tuple[float, float]:
     """목표 용량 하나를 허용 범위(하한, 상한)로 바꾼다."""
     return max(0.5, target_mb - TOLERANCE_MB), target_mb + TOLERANCE_MB
@@ -37,6 +55,27 @@ class Options:
     max_scale: float = 0.5   # 원본 대비 최대 배율 (1.0이면 축소 안 함부터 시도)
     sharpen: bool = False    # 축소 후 약한 출력 샤프닝
     keep_gps: bool = False   # False면 위치 정보 제거
+    preset: str = DEFAULT_PRESET  # 결과 표시용 (직접 설정이면 "custom")
+    mode: str = "size"            # size | edge | original
+    long_edge: int = 0            # edge 모드의 긴 변 상한(px)
+
+
+def preset_options(preset: str = DEFAULT_PRESET, target_mb: float | None = None,
+                   sharpen: bool = False, keep_gps: bool = False) -> Options:
+    """프리셋 이름(또는 "custom" + 목표 용량)을 변환 옵션으로 바꾼다."""
+    common = dict(preset=preset, sharpen=sharpen, keep_gps=keep_gps)
+    if preset == "custom":
+        lo, hi = target_range(DEFAULT_TARGET_MB if target_mb is None else target_mb)
+        return Options(min_mb=lo, max_mb=hi, mode="size", **common)
+    if preset not in PRESETS:
+        raise ValueError(f"알 수 없는 프리셋: {preset}")
+    p = PRESETS[preset]
+    if p["mode"] == "original":
+        return Options(min_mb=0, max_mb=float("inf"), mode="original", **common)
+    if p["mode"] == "edge":
+        return Options(min_mb=0, max_mb=p["max_mb"], mode="edge", long_edge=p["long_edge"], **common)
+    lo, hi = target_range(p["target_mb"])
+    return Options(min_mb=lo, max_mb=hi, mode="size", **common)
 
 
 @dataclass
@@ -52,6 +91,7 @@ class Result:
     note: str = ""
     tries: list = field(default_factory=list)
     kept: bool = False       # 원본을 다시 압축하지 않고 그대로 돌려줌 (quality는 0)
+    preset: str = DEFAULT_PRESET
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -203,30 +243,81 @@ def _search_q(img: pyvips.Image, opts: Options, tries: list, scale: float):
     return best
 
 
+def _oriented_size(img: pyvips.Image) -> tuple[int, int]:
+    """EXIF 회전을 반영한 가로·세로."""
+    if "orientation" in img.get_fields() and img.get("orientation") in (5, 6, 7, 8):
+        return img.height, img.width
+    return img.width, img.height
+
+
+def _keep_original(data: bytes, opts: Options, t0: float) -> tuple[bytes, Result]:
+    """원본을 다시 압축하지 않고 돌려준다 (필요하면 GPS만 무손실로 지움)."""
+    w, h = _oriented_size(pyvips.Image.new_from_buffer(data, ""))  # 머리만 읽는다
+    buf, removed = (data, False) if opts.keep_gps else scrub_gps(data)
+    note = "이미 충분히 작아 원본을 그대로 두었습니다" + (" (위치 정보만 지움)" if removed else "")
+    return buf, Result(width=w, height=h, src_width=w, src_height=h, quality=0, size=len(buf),
+                       src_size=len(data), seconds=round(time.perf_counter() - t0, 2), note=note,
+                       kept=True, preset=opts.preset)
+
+
+def _reencode(data: bytes, opts: Options) -> tuple[bytes, int, int]:
+    """원본 해상도 그대로 다시 저장한다. 디코딩→인코딩을 흘려보내 픽셀을 메모리에 모으지 않는다.
+
+    회전은 픽셀을 돌리지 않고 EXIF 방향값으로 남긴다(90도 회전은 이미지 전체를 메모리에 올린다).
+    optimize_coding/trellis는 이미지 전체의 계수를 메모리에 잡으므로(2억 화소면 1GB 이상) 끈다.
+    크로마는 휴대폰 원본과 같은 4:2:0이라 원본보다 나빠지지 않는다.
+    """
+    img = pyvips.Image.new_from_buffer(data, "", access="sequential")
+    w, h = _oriented_size(img)
+    if img.hasalpha():
+        img = img.flatten(background=[255, 255, 255])
+    if img.interpretation not in ("srgb", "b-w"):
+        img = img.colourspace("srgb")
+    if not opts.keep_gps:
+        img = _strip_gps(img)
+    if opts.sharpen:
+        img = img.sharpen(sigma=0.5, x1=2, m1=0, m2=2)
+    buf = img.jpegsave_buffer(Q=REENCODE_Q, subsample_mode="on", optimize_coding=False,
+                              trellis_quant=False, overshoot_deringing=True, quant_table=3,
+                              keep="exif,icc,xmp,iptc")
+    return buf, w, h
+
+
 def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
     opts = opts or Options()
     t0 = time.perf_counter()
-    small = len(data) <= opts.max_mb * MB
+    is_jpeg = data[:2] == b"\xff\xd8"
 
-    # 이미 상한 안의 JPEG: 다시 압축하지 않고 원본을 돌려준다 (필요하면 GPS만 지움)
-    if small and data[:2] == b"\xff\xd8":
-        head = pyvips.Image.new_from_buffer(data, "")  # 머리만 읽는다
-        w, h = head.width, head.height
-        if "orientation" in head.get_fields() and head.get("orientation") in (5, 6, 7, 8):
-            w, h = h, w
-        buf, removed = (data, False) if opts.keep_gps else scrub_gps(data)
-        note = "이미 목표 크기 안이라 원본을 그대로 두었습니다" + (" (위치 정보만 지움)" if removed else "")
-        return buf, Result(width=w, height=h, src_width=w, src_height=h, quality=0, size=len(buf),
-                           src_size=len(data), seconds=round(time.perf_counter() - t0, 2), note=note, kept=True)
+    # 원본 해상도: 해상도 그대로 다시 저장. 원본 JPEG보다 커지면 원본을 그대로 쓴다
+    if opts.mode == "original":
+        buf, w, h = _reencode(data, opts)
+        if not opts.keep_gps:
+            buf, _ = scrub_gps(buf)
+        if is_jpeg and len(buf) >= len(data):
+            return _keep_original(data, opts, t0)
+        return buf, Result(width=w, height=h, src_width=w, src_height=h, quality=REENCODE_Q, size=len(buf),
+                           src_size=len(data), seconds=round(time.perf_counter() - t0, 2),
+                           note="해상도는 그대로 두고 용량만 줄였습니다", preset=opts.preset)
+
+    # 이미 용량 상한 안의 JPEG는 다시 압축하지 않는다. 긴 변 프리셋도 마찬가지다: 상한 안이면
+    # 원본이 같은 용량에 해상도가 더 높다
+    small = len(data) <= opts.max_mb * MB
+    if small and is_jpeg:
+        return _keep_original(data, opts, t0)
 
     src = _load(data)
     src_w, src_h = src.width, src.height
 
-    # JPEG가 아니어도 이미 상한 안이면 해상도를 줄이지 않고 원래 크기부터 시작한다
-    max_scale = 1.0 if small else opts.max_scale
-    scales = [s for s in (1.0,) + SCALE_STEPS if s <= max_scale]
-    # 출력이 너무 작아지는(장변 2000px 미만) 배율은 제외
-    scales = [s for s in scales if max(src_w, src_h) * s >= 2000] or [scales[0]]
+    if opts.mode == "edge":
+        # 긴 변을 long_edge 이하로. 상한을 못 맞추면 85%, 70%로 한 단계씩 더 줄인다
+        s = min(1.0, opts.long_edge / max(src_w, src_h))
+        scales = [s, s * 0.85, s * 0.7]
+    else:
+        # JPEG가 아니어도 이미 상한 안이면 해상도를 줄이지 않고 원래 크기부터 시작한다
+        max_scale = 1.0 if small else opts.max_scale
+        scales = [s for s in (1.0,) + SCALE_STEPS if s <= max_scale]
+        # 출력이 너무 작아지는(장변 2000px 미만) 배율은 제외
+        scales = [s for s in scales if max(src_w, src_h) * s >= 2000] or [scales[0]]
 
     tries: list = []
     found = None
@@ -242,7 +333,7 @@ def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
     note = ""
     if found:
         q, buf = found
-        if len(buf) < opts.min_mb * MB:
+        if opts.mode == "size" and len(buf) < opts.min_mb * MB:
             note = "최고 품질로도 목표보다 3MB 넘게 작습니다 (원본 정보량이 적은 사진)"
     else:
         # 최소 배율에서도 상한 초과: 최소 배율 + 최저 Q로 저장
@@ -250,12 +341,14 @@ def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
         note = "목표 상한을 넘었습니다 (최소 해상도·최저 품질 적용)"
     if not opts.keep_gps:
         buf, _ = scrub_gps(buf)  # 엔진은 EXIF GPS만 지우므로 XMP의 GPS도 지운다
+    if is_jpeg and len(buf) >= len(data):  # 그래도 원본보다 크면 원본을 그대로 쓴다
+        return _keep_original(data, opts, t0)
 
     result = Result(
         width=img.width, height=img.height,
         src_width=src_w, src_height=src_h,
         quality=q, size=len(buf), src_size=len(data),
         seconds=round(time.perf_counter() - t0, 2),
-        note=note, tries=tries,
+        note=note, tries=tries, preset=opts.preset,
     )
     return buf, result
