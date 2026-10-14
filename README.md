@@ -37,6 +37,8 @@ python -m photo_optimizer.cli D:\사진 -o D:\사진_축소 --target 7
 
 https://tk-korea.github.io/photo-optimizer/
 
+용도 프리셋으로 고른다: 원본 해상도(해상도 그대로 용량만 줄임) · 고화질 보관(5천만 화소, 4–10MB) · 카톡·메신저(긴 변 4000px, 4MB 이하) · 메일 첨부(긴 변 3000px, 2MB 이하) · 직접 설정(목표 용량 ±3MB). 이미 프리셋 안에 드는 JPEG는 다시 압축하지 않는다.
+
 같은 libvips를 WebAssembly로 빌드한 [wasm-vips](https://github.com/kleisauke/wasm-vips)로 위와 같은 방식으로 변환합니다. `main`에 푸시하면 GitHub Actions가 Pages로 배포합니다. HEIC는 지원하지 않습니다. 로컬에서 확인하려면:
 
 ```bash

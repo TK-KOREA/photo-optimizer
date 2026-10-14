@@ -16,7 +16,7 @@
 <script src="sw.js"></script>
 <link rel="stylesheet" href="vendor/pretendard/pretendardvariable-dynamic-subset.css">
 <!-- 배포할 때 ?v= 를 올리면 브라우저 캐시에 남은 옛 파일과 섞이지 않는다 -->
-<link rel="stylesheet" href="style.css?v=11">
+<link rel="stylesheet" href="style.css?v=15">
 </head>
 <body data-s="empty">
 
@@ -112,7 +112,12 @@
   </div>
 
   <div class="controls">
-    <div class="target">
+    <div class="presets" id="presets" role="radiogroup" aria-label="용도"></div>
+    <div class="preset-line">
+      <span id="presetDesc"></span>
+      <button type="button" class="linkbtn" id="customBtn" aria-pressed="false">직접 설정</button>
+    </div>
+    <div class="target" id="customBox" hidden>
       <span class="lab" id="targetLab">목표 용량</span>
       <div class="stepper" role="group" aria-labelledby="targetLab">
         <button type="button" id="minus" aria-label="1MB 줄이기">−</button>
@@ -121,13 +126,10 @@
       </div>
       <span class="rng tnum" id="targetRange"></span>
     </div>
-    <details class="opts" id="opts">
-      <summary>옵션 <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m2 3.5 3 3 3-3"/></svg></summary>
-      <div class="panel">
-        <label class="row"><span>촬영 위치 지우기<small>공유할 때 찍은 장소가 드러나지 않게</small></span><input type="checkbox" class="sw" id="stripGps" checked></label>
-        <label class="row"><span>선명하게 보정<small>줄인 뒤 아주 약하게 또렷하게</small></span><input type="checkbox" class="sw" id="sharpen"></label>
-      </div>
-    </details>
+    <div class="opts" id="opts" role="group" aria-label="옵션">
+      <label class="row"><span>촬영 위치 지우기<small>공유할 때 찍은 장소가 드러나지 않게</small></span><input type="checkbox" class="sw" id="stripGps" checked></label>
+      <label class="row"><span>선명하게 보정<small>줄인 뒤 아주 약하게 또렷하게</small></span><input type="checkbox" class="sw" id="sharpen"></label>
+    </div>
   </div>
 
   <footer>변환 엔진 <a href="https://github.com/kleisauke/wasm-vips">wasm-vips</a>(libvips) · 글꼴 <a href="https://github.com/orioncactus/pretendard">Pretendard</a> · <a href="vendor/wasm-vips/THIRD-PARTY-NOTICES.md">오픈소스 고지</a></footer>
@@ -143,6 +145,6 @@
 </div>
 
 <input type="file" id="pick" accept="image/jpeg,image/png,image/webp,image/tiff" multiple hidden>
-<script type="module" src="app.js?v=11"></script>
+<script type="module" src="app.js?v=15"></script>
 </body>
 </html>

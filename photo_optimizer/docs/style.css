@@ -180,7 +180,19 @@ kbd { font: 500 12px var(--font); padding: 1px 6px; border-radius: 5px; backgrou
 .choice small { display: block; font-size: 12px; color: var(--sub); margin-top: 1px; }
 
 /* ---------- 설정 ---------- */
-.controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 12px 24px; margin-top: 28px; }
+.controls { display: flex; flex-direction: column; align-items: center; gap: 14px; margin-top: 28px; }
+/* 용도 프리셋: 고른 것 하나만 파란 테두리 */
+.presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; width: 100%; max-width: 760px; }
+.preset { text-align: left; min-height: 64px; padding: 12px 14px; border-radius: 14px; background: var(--card); box-shadow: 0 0 0 1px var(--line);
+          transition: box-shadow .15s, background .15s; }
+.preset:hover { box-shadow: 0 0 0 1px color-mix(in srgb, var(--blue) 45%, transparent); }
+.preset b { display: block; font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+.preset small { display: block; margin-top: 2px; font-size: 12px; color: var(--sub); font-variant-numeric: tabular-nums; }
+.preset[aria-checked="true"] { box-shadow: 0 0 0 2px var(--blue); background: color-mix(in srgb, var(--blue) 6%, var(--card)); }
+.preset[aria-checked="true"] b { color: var(--blue); }
+.preset-line { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px 12px; font-size: 14px; color: var(--sub); text-align: center; }
+.linkbtn { min-height: 36px; padding: 0 6px; color: var(--blue); font-size: 14px; font-weight: 500; }
+.linkbtn[aria-pressed="true"] { font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
 .target { display: inline-flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: center; }
 .target .lab { font-size: 15px; font-weight: 600; }
 .target .rng { font-size: 14px; color: var(--sub); }
@@ -195,12 +207,8 @@ kbd { font: 500 12px var(--font); padding: 1px 6px; border-radius: 5px; backgrou
 .stepper .val input:focus { outline: none; }
 .stepper .val:focus-within { box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 40%, transparent); border-radius: 6px; }
 
-.opts { position: relative; }
-.opts summary { list-style: none; display: inline-flex; align-items: center; gap: 4px; height: 36px; padding: 0 6px; font-size: 15px; color: var(--blue); cursor: pointer; }
-.opts summary::-webkit-details-marker { display: none; }
-.opts[open] summary svg { transform: rotate(180deg); }
-.opts .panel { position: absolute; z-index: 20; top: 44px; left: 50%; transform: translateX(-50%); width: 320px; padding: 6px 18px; border-radius: 16px;
-               background: var(--card); box-shadow: 0 0 0 1px var(--line), 0 18px 50px rgba(0,0,0,.16); }
+/* 옵션은 접지 않고 항상 보인다 */
+.opts { width: 340px; max-width: 100%; padding: 2px 18px; border-radius: 16px; background: var(--card); box-shadow: 0 0 0 1px var(--line); }
 .opts .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; font-size: 15px; cursor: pointer; }
 .opts .row + .row { border-top: 1px solid var(--line); }
 .opts .row small { display: block; font-size: 12px; color: var(--sub); margin-top: 2px; }
@@ -238,13 +246,15 @@ footer { text-align: center; color: var(--sub); font-size: 12px; margin-top: 44p
   .cmp .zoom #zoomLabel { min-width: 56px; }
   .pillbtn { height: 44px; padding: 0 16px; }
   .stepper button { width: 44px; height: 44px; }
-  .opts summary { height: 44px; }
   .saveall summary { height: 44px; }
-  .controls { justify-content: flex-start; }
+  .controls { align-items: stretch; }
+  .presets { grid-template-columns: 1fr 1fr; }
+  .preset { min-height: 68px; }
+  .preset-line { justify-content: flex-start; text-align: left; }
+  .linkbtn { min-height: 44px; }
   .target { justify-content: flex-start; }
   /* 옵션은 휴대폰에서 떠 있는 창 대신 그 자리에서 펼친다 (화면 밖으로 나가거나 아래 버튼에 가리지 않게) */
   .opts { width: 100%; }
-  .opts .panel { position: static; transform: none; width: 100%; margin-top: 4px; box-shadow: 0 0 0 1px var(--line); }
 
   .dock { display: block; position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; padding: 12px 16px calc(14px + env(safe-area-inset-bottom));
           background: linear-gradient(to top, var(--bg) 72%, color-mix(in srgb, var(--bg) 0%, transparent)); }

@@ -1,6 +1,6 @@
 // 화면 처리. 변환은 worker.js가 이 기기 안에서 한다.
 // ?v= 는 index.html의 버전과 맞춘다 (캐시에 남은 옛 파일과 섞이지 않게)
-import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=11";
+import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=15";
 const $ = id => document.getElementById(id);
 const MB = 1048576;
 const TOL = 3;  // 목표 용량 ± 허용 오차 (MB)
@@ -37,7 +37,50 @@ const INFO = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor
   });
 })();
 
-// ---------- 목표 용량: 하나만 고르고 ±3MB 허용 ----------
+// ---------- 용도 프리셋 ----------
+// mode: original = 해상도 그대로 다시 저장, size = 목표 용량(±3MB)에 맞춤, edge = 긴 변 N px + 용량 상한
+const PRESETS = {
+  original:  { label: "원본 해상도", spec: "2억 화소 그대로", desc: "해상도는 그대로, 용량만 줄여요 · PC 권장", redo: "원본 해상도로 다시 저장", mode: "original" },
+  archive:   { label: "고화질 보관", spec: "5천만 화소 · 4–10MB", desc: "보관·백업·크게 인화할 사진", redo: "고화질 보관으로 다시 줄이기", mode: "size", target: 7 },
+  messenger: { label: "카톡·메신저", spec: "1,200만 화소 · 4MB 이하", desc: "메신저로 보내기 좋은 크기", redo: "카톡·메신저용으로 다시 줄이기", mode: "edge", long_edge: 4000, max_mb: 4 },
+  mail:      { label: "메일 첨부", spec: "700만 화소 · 2MB 이하", desc: "여러 장을 한 메일에 넣기 좋은 크기", redo: "메일 첨부용으로 다시 줄이기", mode: "edge", long_edge: 3000, max_mb: 2 },
+};
+const PRESET_KEY = "photo-optimizer:preset";
+let preset = "archive";
+try { const p = localStorage.getItem(PRESET_KEY); if (p === "custom" || PRESETS[p]) preset = p; } catch {}
+
+$("presets").innerHTML = Object.entries(PRESETS).map(([k, p]) =>
+  `<button type="button" class="preset" role="radio" data-preset="${k}"><b>${p.label}</b><small>${p.spec}</small></button>`).join("");
+function setPreset(p) {
+  preset = p;
+  try { localStorage.setItem(PRESET_KEY, p); } catch {}
+  showPreset();
+}
+function showPreset() {
+  for (const b of $("presets").children) {
+    const on = b.dataset.preset === preset;
+    b.setAttribute("aria-checked", on);
+    b.tabIndex = on || (preset === "custom" && b === $("presets").firstElementChild) ? 0 : -1;
+  }
+  const custom = preset === "custom";
+  $("customBtn").setAttribute("aria-pressed", custom);
+  $("customBox").hidden = !custom;
+  $("presetDesc").textContent = custom ? "원하는 용량을 직접 정해요" : PRESETS[preset].desc;
+  if (items[sel]?.status === "done") renderDone(items[sel]);  // "다시 줄이기" 버튼 갱신
+}
+$("presets").addEventListener("click", e => { const b = e.target.closest(".preset"); if (b) setPreset(b.dataset.preset); });
+// 라디오 그룹 관례: 방향키로 옮겨 고른다
+$("presets").addEventListener("keydown", e => {
+  const keys = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
+  if (!(e.key in keys)) return;
+  e.preventDefault();
+  const list = [...$("presets").children], i = Math.max(0, list.findIndex(b => b.dataset.preset === preset));
+  const next = list[(i + keys[e.key] + list.length) % list.length];
+  setPreset(next.dataset.preset); next.focus();
+});
+$("customBtn").onclick = () => setPreset(preset === "custom" ? "archive" : "custom");
+
+// ---------- 직접 설정: 목표 용량 하나, ±3MB 허용 ----------
 const targetInput = $("targetMb");
 // 1~47 사이의 정수만 받는다. 칸에 보이는 값과 실제로 쓰는 값이 항상 같아야 한다.
 function target() {
@@ -69,24 +112,29 @@ showTarget();
 
 // 지금 화면의 설정 (입력칸을 고치지 않고 읽기만). 값이 잘못됐으면 null
 function peekOpts() {
-  const t = target();
-  return t && { target: t, keep_gps: !$("stripGps").checked, sharpen: $("sharpen").checked };
+  const t = preset === "custom" ? target() : null;
+  if (preset === "custom" && !t) return null;
+  return { preset, target: t, keep_gps: !$("stripGps").checked, sharpen: $("sharpen").checked };
 }
 $("stripGps").addEventListener("change", showTarget);
 $("sharpen").addEventListener("change", showTarget);
 
 // 넣는 순간의 설정을 사진마다 고정한다 (대기 중에 설정을 바꿔도 이미 넣은 사진은 그대로)
 function currentOpts() {
-  const t = normalizeTarget();
-  return {
-    min_mb: Math.max(0.5, t - TOL), max_mb: t + TOL, target: t,
-    min_q: 85, max_q: 95, max_scale: 0.5,
-    sharpen: $("sharpen").checked, keep_gps: !$("stripGps").checked,
-  };
+  const base = { preset, min_q: 85, max_q: 95, max_scale: 0.5, sharpen: $("sharpen").checked, keep_gps: !$("stripGps").checked };
+  const p = PRESETS[preset];
+  if (!p) {  // 직접 설정
+    const t = normalizeTarget();
+    return { ...base, mode: "size", label: `${t}MB`, target: t, min_mb: Math.max(0.5, t - TOL), max_mb: t + TOL };
+  }
+  if (p.mode === "original") return { ...base, mode: "original", label: p.label, min_mb: 0, max_mb: Infinity };
+  if (p.mode === "edge") return { ...base, mode: "edge", label: p.label, long_edge: p.long_edge, min_mb: 0, max_mb: p.max_mb };
+  return { ...base, mode: "size", label: p.label, target: p.target, min_mb: p.target - TOL, max_mb: p.target + TOL };
 }
+showPreset();
 
-// 펼침 메뉴(옵션, 모두 저장): 바깥을 누르거나 Esc를 누르면 닫는다
-const menus = [$("opts"), $("saveAll")];
+// 펼침 메뉴(모두 저장): 바깥을 누르거나 Esc를 누르면 닫는다
+const menus = [$("saveAll")];
 document.addEventListener("click", e => { for (const d of menus) if (!d.contains(e.target)) d.open = false; });
 addEventListener("keydown", e => {
   if (e.key !== "Escape") return;
@@ -181,20 +229,33 @@ async function convert(it, opts) {
   const t0 = performance.now();
   const seconds = () => Math.round((performance.now() - t0) / 1000);
   const data = new Uint8Array(await it.file.arrayBuffer());
+  const onMsg = m => progress(it, m);
+  // 원본을 그대로 돌려줄 때: 위치 정보 지우기가 켜져 있으면 픽셀은 그대로 두고 GPS만 지운다
+  const keepOriginal = info => {
+    const { bytes, removed } = opts.keep_gps ? { bytes: data, removed: false } : scrubGps(data);
+    it.src = it.out = { w: info.w, h: info.h };
+    return { kept: true, gpsRemoved: removed, found: { q: null, buf: bytes }, seconds: seconds() };
+  };
+
+  // 원본 해상도: 해상도 그대로 다시 저장. 원본보다 커지면 원본을 그대로 쓴다
+  if (opts.mode === "original") {
+    const input = data.slice();
+    const r = await step({ op: "reencode", data: input, sharpen: opts.sharpen, keep_gps: opts.keep_gps }, [input.buffer], onMsg);
+    const buf = opts.keep_gps ? r.buf : scrubGps(r.buf).bytes;
+    if (isJpeg(data) && buf.length >= data.length) return keepOriginal({ w: r.srcW, h: r.srcH });
+    it.src = it.out = { w: r.srcW, h: r.srcH };
+    return { found: { q: r.q, buf }, preview: r.preview, ref: r.ref, res: r.res, seconds: seconds() };
+  }
+
+  // 이미 프리셋 안에 드는 JPEG(용량 상한 이하, 긴 변 제한 이하)는 다시 압축하지 않는다.
+  // 다시 압축하면 해상도만 잃거나 오히려 커진다.
   const small = data.length <= opts.max_mb * MB;
-  // 이미 상한 안의 JPEG는 다시 압축하지 않는다. 다시 압축하면 해상도만 잃거나 오히려 커진다.
-  // 위치 정보 지우기가 켜져 있으면 픽셀은 그대로 두고 GPS만 지운다.
   if (small && isJpeg(data)) {
     const info = jpegInfo(data);
-    if (info.w && info.h) {
-      const { bytes, removed } = opts.keep_gps ? { bytes: data, removed: false } : scrubGps(data);
-      it.src = it.out = { w: info.w, h: info.h };
-      return { kept: true, gpsRemoved: removed, found: { q: null, buf: bytes }, seconds: seconds() };
-    }
+    if (info.w && info.h && (!opts.long_edge || Math.max(info.w, info.h) <= opts.long_edge)) return keepOriginal(info);
   }
-  // JPEG가 아니어도 이미 상한 안이면 해상도를 줄이지 않고 원래 크기부터 시작한다
-  const runOpts = small ? { ...opts, max_scale: 1 } : opts;
-  const onMsg = m => progress(it, m);
+  // JPEG가 아니어도 이미 상한 안이면 해상도를 줄이지 않고 원래 크기부터 시작한다 (긴 변 프리셋은 원래 그렇게 동작)
+  const runOpts = small && opts.mode === "size" ? { ...opts, max_scale: 1 } : opts;
   let scales, shrunk, enc, lean = false;
   for (let i = 0; ; i++) {
     const input = data.slice();  // 넘긴 버퍼는 워커로 옮겨지므로 배율마다 복사
@@ -223,12 +284,15 @@ function progress(it, m) {
   if (m.phase === "resize") { it.phase = "resize"; it.retry = m.retry; it.p = Math.max(it.p, m.retry ? 40 : 2); it.q = null; }
   if (m.phase === "q") { it.phase = "q"; it.tries = (it.tries || 0) + 1; it.p = Math.min(94, 48 + it.tries * 11); it.q = m; }
   if (m.phase === "lean") { it.lean = true; it.tries = 0; }
+  if (m.phase === "orig") { it.phase = "orig"; it.p = Math.max(it.p, 3); }
+  if (m.phase === "views") { it.phase = "views"; it.p = Math.max(it.p, 90); }
   render();
 }
 setInterval(() => {
   const it = items.find(i => i.status === "work");
-  if (it && it.phase === "resize" && it.p < 45) {
-    it.p += (45 - it.p) * 0.035;
+  const cap = it?.phase === "resize" ? 45 : it?.phase === "orig" ? 88 : 0;
+  if (it && it.p < cap) {
+    it.p += (cap - it.p) * (it.phase === "orig" ? 0.02 : 0.035);
     if (it === items[sel]) { renderWork(it); renderDock(it); }
   }
 }, 200);
@@ -249,6 +313,7 @@ async function run(it) {
     it.blob = new Blob([f.buf], { type: "image/jpeg" });
     it.url = URL.createObjectURL(it.blob);
     if (r.kept) it.preview = it.url;  // 원본 JPEG는 그대로 화면에 띄울 수 있다
+    else if (r.preview) it.preview = blobUrl(r.preview, "image/jpeg");
     if (r.ref) { it.ref = blobUrl(r.ref, "image/png"); it.res = blobUrl(r.res, "image/png"); }
     it.status = "done"; it.p = 100; it.fresh = true;
   } catch (e) {
@@ -287,6 +352,12 @@ function renderWork(it) {
   else if (it.phase === "resize") {
     step = "사진 읽고 줄이는 중";
     detail = it.retry ? "목표보다 커서 조금 더 작게 줄이는 중" : "고해상도 사진은 30초쯤 걸려요";
+  } else if (it.phase === "orig") {
+    step = "원본 해상도로 다시 저장하는 중";
+    detail = "해상도는 그대로, 용량만 줄여요";
+  } else if (it.phase === "views") {
+    step = "비교 화면 만드는 중";
+    detail = "거의 다 됐어요";
   } else if (it.phase === "prep") {
     step = "가장 좋은 화질 찾는 중";
     detail = `${koPixels(it.src.w, it.src.h)} → ${koPixels(it.out.w, it.out.h)} 화소로 줄였어요`;
@@ -297,44 +368,51 @@ function renderWork(it) {
   $("workStep").textContent = step;
   $("workDetail").textContent = detail;
   $("workBar").style.width = (it.status === "wait" ? 0 : it.p) + "%";
-  const stage = it.status === "wait" ? -1 : it.phase === "resize" ? 0 : 1;  // prep, q는 "화질 찾기"
+  const stage = it.status === "wait" ? -1 : it.phase === "resize" || it.phase === "orig" ? 0 : 1;  // prep, q, views는 두 번째 단계
   [...$("workDots").children].forEach((li, i) => li.className = i < stage ? "ok" : i === stage ? "on" : "");
 }
 
 function renderDone(it) {
   const r = it.result, o = it.opts;
-  const mb = r.size / MB, inRange = r.kept || (!r.over && mb >= o.min_mb);
+  const mb = r.size / MB, inRange = r.kept || o.mode === "original" || (!r.over && mb >= o.min_mb);
   $("okLine").className = "ok" + (inRange ? "" : " warnc");
   $("okLine").innerHTML = (inRange ? CHECK : INFO) + (
     r.kept ? "이미 충분히 작아서 그대로 두었어요"
-    : inRange ? `목표 크기(${o.min_mb}–${o.max_mb}MB)에 맞췄어요`
-    : r.over ? "목표보다 커요" : "목표보다 작게 나왔어요");
+    : o.mode === "original" ? "해상도는 그대로, 용량만 줄였어요"
+    : !inRange ? (r.over ? "목표보다 커요" : "목표보다 작게 나왔어요")
+    : o.mode === "edge" ? `${o.label}용으로 맞췄어요`
+    : `목표 크기(${o.min_mb}–${o.max_mb}MB)에 맞췄어요`);
   $("fromMb").textContent = r.kept ? "" : fmtMb(it.file.size) + "MB";
   const pct = Math.round(100 * (1 - r.size / it.file.size));
   $("saved").textContent = r.kept ? (r.gpsRemoved ? "화질은 그대로, 위치 정보만 지웠어요" : "다시 압축할 필요가 없었어요")
     : pct > 0 ? `${pct}% 가벼워졌어요` : pct === 0 ? "용량이 거의 같아요" : `원본보다 ${-pct}% 커졌어요`;
+  const same = r.kept || o.mode === "original";
   $("factList").innerHTML = [
-    ["해상도", r.kept ? `${koPixels(it.src.w, it.src.h)} 화소 (그대로)` : `${koPixels(it.src.w, it.src.h)} → ${koPixels(it.out.w, it.out.h)} 화소`],
+    ["용도", o.preset === "custom" ? `직접 설정 (${o.target}MB)` : o.label],
+    ["해상도", same ? `${koPixels(it.src.w, it.src.h)} 화소 (그대로)` : `${koPixels(it.src.w, it.src.h)} → ${koPixels(it.out.w, it.out.h)} 화소`],
     ["크기", `${it.out.w} × ${it.out.h}`],
     ["화질(JPEG)", r.kept ? "원본 그대로" : r.q],
     ["촬영 위치", o.keep_gps ? "유지" : r.kept && !r.gpsRemoved ? "원래 없음" : "지움"],
     ["걸린 시간", `${r.seconds}초`],
   ].map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v))}</dd>`).join("");
   const notes = [];
-  if (r.over) notes.push("가장 작게 줄여도 목표보다 커요. 목표 용량을 늘려 보세요.");
-  else if (!inRange) notes.push("더 키워도 화질이 나아지지 않아 이 크기로 저장했어요.");
+  if (r.over) notes.push(o.mode === "size" ? "가장 작게 줄여도 목표보다 커요. 목표 용량을 늘려 보세요." : "가장 작게 줄여도 목표보다 커요. 다른 용도를 골라 보세요.");
+  else if (!inRange && o.mode === "size") notes.push("더 키워도 화질이 나아지지 않아 이 크기로 저장했어요.");
   if (r.lean) notes.push("기기 메모리가 부족해 메모리를 아끼는 방식으로 저장했어요.");
   $("note").hidden = !notes.length;
   $("note").textContent = notes.join(" ");
 
   // 지금 설정이 이 사진을 넣을 때와 다르면 같은 파일을 새 설정으로 다시 줄일 수 있게 한다
   const now = peekOpts(), redo = $("redoBtn");
-  let changed = now && (now.target !== o.target || now.keep_gps !== o.keep_gps || now.sharpen !== o.sharpen);
-  // 원본을 그대로 둔 사진은 새 상한에도 들어가고 위치 정보 설정이 같으면 다시 해도 결과가 같다
-  if (changed && r.kept && it.file.size <= (now.target + TOL) * MB && now.keep_gps === o.keep_gps) changed = false;
+  let changed = now && (now.preset !== o.preset || (now.preset === "custom" && now.target !== o.target)
+    || now.keep_gps !== o.keep_gps || now.sharpen !== o.sharpen);
+  // 원본을 그대로 둔 사진이 새 설정에서도 그대로 남을 사진이면 다시 해도 결과가 같다
+  if (changed && r.kept && now.keep_gps === o.keep_gps && wouldKeep(it, now)) changed = false;
   redo.hidden = !changed;
   if (changed) {
-    redo.textContent = now.target !== o.target ? `${now.target}MB로 다시 줄이기` : "바뀐 옵션으로 다시 줄이기";
+    const presetChanged = now.preset !== o.preset || now.target !== o.target;
+    redo.textContent = !presetChanged ? "바뀐 옵션으로 다시 줄이기"
+      : now.preset === "custom" ? `${now.target}MB로 다시 줄이기` : PRESETS[now.preset].redo;
     redo.onclick = () => addFiles([it.file]);
   }
 
@@ -369,6 +447,15 @@ function renderDone(it) {
 }
 
 let countToken = 0;
+
+// 원본을 그대로 둔 사진이 새 설정에서도 그대로 남는가 (용량 상한·긴 변 제한 안)
+function wouldKeep(it, now) {
+  const p = PRESETS[now.preset], size = it.file.size, edge = Math.max(it.src.w, it.src.h);
+  if (!p) return size <= (now.target + TOL) * MB;
+  if (p.mode === "original") return false;
+  if (p.mode === "edge") return size <= p.max_mb * MB && edge <= p.long_edge;
+  return size <= (p.target + TOL) * MB;
+}
 
 // 비교: "실제 크기로 비교"(가운데 1200×900, 결과 픽셀 1:1) ↔ "전체 사진"
 // 확대: 두 장을 같은 변환으로 움직인다. s = 이미지 1픽셀이 화면에서 차지하는 크기 (1 = 100%, 실제 픽셀)

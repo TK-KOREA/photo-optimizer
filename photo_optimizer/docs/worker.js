@@ -6,6 +6,7 @@
 // 성분마다 100MB짜리 계수 버퍼를 2벌씩 잡는다. 그래서 워커 하나가 한 단계만 하고 끝난다.
 //   resize: 원본 디코딩 → 선형광 Lanczos3 축소 → 픽셀과 메타데이터를 돌려준다
 //   encode: 새 힙에서 픽셀을 받아 Q 이진 탐색
+//   reencode: (원본 해상도 프리셋) 해상도 그대로 디코딩→인코딩을 흘려보낸다. 픽셀을 메모리에 모으지 않는다
 import Vips from "./vendor/wasm-vips/vips-es6.js";
 
 const MB = 1024 * 1024;
@@ -46,6 +47,12 @@ function stripGps(s, img) {
   return out;
 }
 
+// 긴 변을 long_edge px 이하로 맞추는 배율. 상한을 못 맞추면 85%, 70%로 한 단계씩 더 줄인다
+function edgeScales(w, h, longEdge) {
+  const s = Math.min(1, longEdge / Math.max(w, h));
+  return [s, s * 0.85, s * 0.7];
+}
+
 function pickScales(w, h, maxScale) {
   const scales = [1.0, ...SCALE_STEPS].filter(x => x <= maxScale);
   // 출력이 너무 작아지는(장변 2000px 미만) 배율은 제외
@@ -54,7 +61,7 @@ function pickScales(w, h, maxScale) {
 }
 
 // scale을 안 주면 원본 크기로 배율 목록을 정하고 첫 배율로 축소한다
-function resize({ data, scale, max_scale, sharpen, keep_gps }) {
+function resize({ data, scale, max_scale, long_edge, sharpen, keep_gps }) {
   const s = new Scope();
   try {
     let img = s.add(vips.Image.newFromBuffer(data, "", { access: "sequential" }));
@@ -63,7 +70,7 @@ function resize({ data, scale, max_scale, sharpen, keep_gps }) {
     if (srcW * srcH > MAX_PIXELS) {
       throw new UserError(`3억 화소까지 줄일 수 있어요. 이 사진은 ${(srcW * srcH / 1e8).toFixed(1).replace(/\.0$/, "")}억 화소예요.`);
     }
-    const scales = pickScales(srcW, srcH, max_scale);
+    const scales = long_edge ? edgeScales(srcW, srcH, long_edge) : pickScales(srcW, srcH, max_scale);
     scale ??= scales[0];
 
     // 선형 광(linear light) 공간에서 Lanczos3로 축소한다 (core.py의 _resize와 동일)
@@ -84,6 +91,61 @@ function resize({ data, scale, max_scale, sharpen, keep_gps }) {
     out = s.add(out.cast("uchar"));
     const pixels = out.writeToMemory();
     return { srcW, srcH, scales, scale, width: out.width, height: out.height, bands: out.bands, pixels, meta };
+  } finally {
+    s.free();
+  }
+}
+
+// ---------- reencode (원본 해상도) ----------
+
+const REENCODE_Q = 88;
+
+// 결과 픽셀 공간(회전 전)에서 가운데 영역을 잘라 화면 방향으로 돌린 PNG
+function centerCrop(s, data) {
+  const img = s.add(vips.Image.newFromBuffer(data, "", { access: "sequential" }));
+  const cw = Math.min(CROP_W, img.width), ch = Math.min(CROP_H, img.height);
+  // 순서대로 읽는 원본에서 바로 돌리면 줄 순서가 어긋나 실패한다. 작은 조각을 먼저 메모리에 담고 돌린다
+  let c = s.add(s.add(img.crop((img.width - cw) >> 1, (img.height - ch) >> 1, cw, ch)).copyMemory());
+  c = s.add(c.autorot());
+  if (c.hasAlpha()) c = s.add(c.flatten({ background: [255, 255, 255] }));
+  if (c.interpretation !== "srgb" && c.interpretation !== "b-w") c = s.add(c.colourspace("srgb"));
+  return c.pngsaveBuffer({ compression: 1 });
+}
+
+function reencode({ data, sharpen, keep_gps }) {
+  const s = new Scope();
+  try {
+    let img = s.add(vips.Image.newFromBuffer(data, "", { access: "sequential" }));
+    if (img.width * img.height > MAX_PIXELS) {
+      throw new UserError(`3억 화소까지 줄일 수 있어요. 이 사진은 ${(img.width * img.height / 1e8).toFixed(1).replace(/\.0$/, "")}억 화소예요.`);
+    }
+    const fields = img.getFields(), names = [];
+    for (let i = 0; i < fields.size(); i++) names.push(fields.get(i));
+    fields.delete();
+    const orient = names.includes("orientation") ? img.getInt("orientation") : 1;
+    const turned = orient >= 5 && orient <= 8;
+    const srcW = turned ? img.height : img.width, srcH = turned ? img.width : img.height;
+    // 회전은 픽셀을 돌리지 않고 EXIF 방향값으로 남긴다 (90도 회전은 이미지 전체를 메모리에 올려야 한다)
+    if (img.hasAlpha()) img = s.add(img.flatten({ background: [255, 255, 255] }));
+    if (img.interpretation !== "srgb" && img.interpretation !== "b-w") img = s.add(img.colourspace("srgb"));
+    if (!keep_gps) img = stripGps(s, img);
+    if (sharpen) img = s.add(img.sharpen({ sigma: 0.5, x1: 2, m1: 0, m2: 2 }));
+    progress({ phase: "orig" });
+    // 원본 해상도에서는 계수 버퍼(2억 화소면 1GB 이상)를 잡을 수 없어 optimize_coding/trellis를 끈다.
+    // 크로마는 휴대폰 원본과 같은 4:2:0이라 원본보다 나빠지지 않는다.
+    const buf = img.jpegsaveBuffer({
+      Q: REENCODE_Q, subsample_mode: "on", optimize_coding: false, trellis_quant: false,
+      overshoot_deringing: true, quant_table: 3, keep: 1 | 2 | 4 | 8,
+    });
+    s.free();
+    progress({ phase: "views" });
+    let views = {};
+    try {
+      const preview = vips.Image.thumbnailBuffer(data, PREVIEW_PX);  // 축소 읽기라 가볍다 (회전도 반영)
+      views = { preview: preview.jpegsaveBuffer({ Q: 82 }), ref: centerCrop(s, data), res: centerCrop(s, buf) };
+      preview.delete();
+    } catch (e) { console.warn("미리보기 생성 실패", e); }
+    return { buf, srcW, srcH, q: REENCODE_Q, ...views };
   } finally {
     s.free();
   }
@@ -189,7 +251,12 @@ function encode({ pixels, width, height, bands, meta, opts, scale, last }) {
 onmessage = async ({ data: msg }) => {
   try {
     vips = await ready;
-    if (msg.op === "resize") {
+    if (msg.op === "reencode") {
+      const r = reencode(msg);
+      const transfer = [r.buf.buffer];
+      if (r.ref) transfer.push(r.ref.buffer, r.res.buffer, r.preview.buffer);
+      postMessage({ type: "done", ...r }, transfer);
+    } else if (msg.op === "resize") {
       progress({ phase: "resize", retry: msg.scale !== undefined });
       const r = resize(msg);
       postMessage({ type: "done", ...r }, [r.pixels.buffer, r.meta.buffer]);
