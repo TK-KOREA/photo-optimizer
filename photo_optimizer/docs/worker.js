@@ -30,7 +30,8 @@ class Scope {
 
 class UserError extends Error {}
 
-const progress = text => postMessage({ type: "progress", text });
+// 진행 상황: phase = "resize" | "q" | "lean"
+const progress = info => postMessage({ type: "progress", ...info });
 
 // ---------- resize ----------
 
@@ -120,7 +121,7 @@ function searchQ(img, opts, scale, tries) {
     const q = (lo + hi) >> 1;
     const buf = encodeOnce(img, q);
     tries.push({ scale, q, mb: +(buf.length / MB).toFixed(2), lean });
-    progress(`${Math.round(scale * 100)}% 크기 · 품질 ${q} → ${(buf.length / MB).toFixed(1)}MB`);
+    progress({ phase: "q", q, mb: (buf.length / MB).toFixed(2), fits: buf.length <= limit });
     if (buf.length <= limit) { best = { q, buf }; lo = q + 1; }
     else hi = q - 1;
   }
@@ -131,9 +132,24 @@ function withLeanRetry(fn) {
   try { return fn(); }
   catch (e) {
     if (!(e instanceof LeanRetry)) throw e;
-    progress("메모리 절약 모드로 다시 계산하는 중");
+    progress({ phase: "lean" });
     return fn();
   }
+}
+
+const PREVIEW_PX = 1600;
+const CROP_W = 1200, CROP_H = 900;
+
+// "실제 크기로 비교"용 같은 영역 두 장 (가운데, 결과 픽셀 1:1).
+// ref는 JPEG로 압축하기 직전 픽셀(= 원본을 같은 크기로 본 모습), res는 실제 결과 JPEG를 디코딩한 것.
+// 둘 다 무손실 PNG로 넘겨 비교에 다른 손실이 끼지 않게 한다.
+function makeViews(s, img, buf) {
+  const w = Math.min(CROP_W, img.width), h = Math.min(CROP_H, img.height);
+  const x = (img.width - w) >> 1, y = (img.height - h) >> 1;
+  const ref = s.add(img.crop(x, y, w, h)).pngsaveBuffer({ compression: 1 });
+  const dec = s.add(vips.Image.newFromBuffer(buf, "", { access: "sequential" }));
+  const res = s.add(dec.crop(x, y, w, h)).pngsaveBuffer({ compression: 1 });
+  return { ref, res };
 }
 
 function encode({ pixels, width, height, bands, meta, opts, scale, last }) {
@@ -148,13 +164,21 @@ function encode({ pixels, width, height, bands, meta, opts, scale, last }) {
     const img = joined.copyMemory();
     s.free();  // 이후 Q 탐색에서 여러 번 인코딩하므로 결과만 메모리에 남긴다
     s.add(img);
+    // 품질을 찾는 동안 화면에 띄울 미리보기
+    const preview = s.add(img.resize(Math.min(1, PREVIEW_PX / Math.max(width, height)))).jpegsaveBuffer({ Q: 82 });
+    postMessage({ type: "preview", preview }, [preview.buffer]);
 
     let found = withLeanRetry(() => searchQ(img, opts, scale, tries));
     if (!found && last) {
       // 최소 배율에서도 상한 초과: 최저 Q로 저장
       found = { q: opts.min_q, buf: withLeanRetry(() => encodeOnce(img, opts.min_q)), over: true };
     }
-    return { found, tries, lean };
+    let views = {};
+    if (found) {
+      try { views = makeViews(s, img, found.buf); }
+      catch (e) { console.warn("미리보기 생성 실패", e); }  // 미리보기는 없어도 변환은 성공
+    }
+    return { found, tries, lean, ...views };
   } finally {
     s.free();
   }
@@ -166,12 +190,14 @@ onmessage = async ({ data: msg }) => {
   try {
     vips = await ready;
     if (msg.op === "resize") {
-      progress(msg.scale === undefined ? "사진 읽고 줄이는 중" : `${Math.round(msg.scale * 100)}% 크기로 다시 줄이는 중`);
+      progress({ phase: "resize", retry: msg.scale !== undefined });
       const r = resize(msg);
       postMessage({ type: "done", ...r }, [r.pixels.buffer, r.meta.buffer]);
     } else {
       const r = encode(msg);
-      postMessage({ type: "done", ...r }, r.found ? [r.found.buf.buffer] : []);
+      const transfer = r.found ? [r.found.buf.buffer] : [];
+      if (r.ref) transfer.push(r.ref.buffer, r.res.buffer);
+      postMessage({ type: "done", ...r }, transfer);
     }
   } catch (e) {
     const text = String(e?.message || e);
