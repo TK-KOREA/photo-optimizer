@@ -10,8 +10,12 @@ if (typeof window === 'undefined') {
         if (event.request.method !== "POST" || !url.pathname.endsWith("/share-target")) return;
         event.stopImmediatePropagation();  // 아래 COOP/COEP 처리기가 같은 요청에 응답하지 않게
         event.respondWith((async () => {
-            const form = await event.request.formData();
-            const files = form.getAll("photos").filter((f) => f && typeof f === "object" && "name" in f);
+            // 파일이 없거나 읽을 수 없는 요청(빈 multipart 등)도 오류 대신 ?shared=0 으로 넘겨 안내한다
+            let files = [];
+            try {
+                const form = await event.request.formData();
+                files = form.getAll("photos").filter((f) => f && typeof f === "object" && "name" in f);
+            } catch (e) { /* 아래에서 0장으로 처리 */ }
             const cache = await caches.open("share-target");
             for (const key of await cache.keys()) await cache.delete(key);
             await Promise.all(files.map((f, i) => cache.put(new URL(`shared/${i}`, self.registration.scope).href,

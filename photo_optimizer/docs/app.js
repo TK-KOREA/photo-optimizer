@@ -1,6 +1,6 @@
 // 화면 처리. 변환은 worker.js가 이 기기 안에서 한다.
 // ?v= 는 index.html의 버전과 맞춘다 (캐시에 남은 옛 파일과 섞이지 않게)
-import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=15";
+import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=17";
 const $ = id => document.getElementById(id);
 const MB = 1048576;
 const TOL = 3;  // 목표 용량 ± 허용 오차 (MB)
@@ -52,6 +52,7 @@ try { const p = localStorage.getItem(PRESET_KEY); if (p === "custom" || PRESETS[
 $("presets").innerHTML = Object.entries(PRESETS).map(([k, p]) =>
   `<button type="button" class="preset" role="radio" data-preset="${k}"><b>${p.label}</b><small>${p.spec}</small></button>`).join("");
 function setPreset(p) {
+  if (p !== "custom") lastPreset = p;
   preset = p;
   try { localStorage.setItem(PRESET_KEY, p); } catch {}
   showPreset();
@@ -78,7 +79,13 @@ $("presets").addEventListener("keydown", e => {
   const next = list[(i + keys[e.key] + list.length) % list.length];
   setPreset(next.dataset.preset); next.focus();
 });
-$("customBtn").onclick = () => setPreset(preset === "custom" ? "archive" : "custom");
+// 직접 설정을 끄면 켜기 직전의 프리셋으로 돌아간다
+let lastPreset = preset === "custom" ? "archive" : preset;
+$("customBtn").onclick = () => {
+  if (preset === "custom") return setPreset(lastPreset);
+  lastPreset = preset;
+  setPreset("custom");
+};
 
 // ---------- 직접 설정: 목표 용량 하나, ±3MB 허용 ----------
 const targetInput = $("targetMb");
@@ -176,6 +183,15 @@ addEventListener("paste", e => {
   if (files.length) addFiles(files);
 });
 
+// 짧은 안내 한 줄 (2.5초)
+let toastTimer;
+function toast(text) {
+  const t = $("toast");
+  t.textContent = text; t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 2500);
+}
+
 // 갤러리의 "공유"로 들어온 사진: sw.js가 Cache Storage에 넣어 둔 파일을 꺼내 바로 시작한다
 async function takeShared() {
   if (!new URLSearchParams(location.search).has("shared")) return;
@@ -188,12 +204,16 @@ async function takeShared() {
       await cache.delete(req);
     }
     if (files.length) addFiles(files);
-  } catch (e) { console.warn("공유받은 사진을 읽지 못했습니다", e); }
+    else toast("공유받은 사진이 없어요");
+  } catch (e) { console.warn("공유받은 사진을 읽지 못했습니다", e); toast("공유받은 사진을 읽지 못했어요"); }
 }
 
 function addFiles(list) {
   if (!supported) return;
-  const files = [...list].filter(f => /^image\//.test(f.type) || /\.(jpe?g|png|webp|tiff?)$/i.test(f.name));
+  // HEIC는 받아서 run()에서 안내한다 (Windows 등에서는 형식 정보가 비어 있다)
+  const all = [...list], files = all.filter(f => /^image\//.test(f.type) || /\.(jpe?g|png|webp|tiff?|heic|heif)$/i.test(f.name));
+  const skipped = all.length - files.length;
+  if (skipped) toast(files.length ? `사진이 아닌 파일 ${skipped}개는 건너뛰었어요` : "사진 파일만 넣을 수 있어요");
   if (!files.length) return;
   const first = items.length, opts = currentOpts();
   follow = true;
@@ -247,12 +267,12 @@ async function convert(it, opts) {
     return { found: { q: r.q, buf }, preview: r.preview, ref: r.ref, res: r.res, seconds: seconds() };
   }
 
-  // 이미 프리셋 안에 드는 JPEG(용량 상한 이하, 긴 변 제한 이하)는 다시 압축하지 않는다.
-  // 다시 압축하면 해상도만 잃거나 오히려 커진다.
+  // 이미 용량 상한 안의 JPEG는 다시 압축하지 않는다. 긴 변 프리셋도 마찬가지다: 상한 안이면
+  // 원본이 같은 용량에 해상도가 더 높으니, 다시 압축하면 해상도만 잃거나 오히려 커진다.
   const small = data.length <= opts.max_mb * MB;
   if (small && isJpeg(data)) {
     const info = jpegInfo(data);
-    if (info.w && info.h && (!opts.long_edge || Math.max(info.w, info.h) <= opts.long_edge)) return keepOriginal(info);
+    if (info.w && info.h) return keepOriginal(info);
   }
   // JPEG가 아니어도 이미 상한 안이면 해상도를 줄이지 않고 원래 크기부터 시작한다 (긴 변 프리셋은 원래 그렇게 동작)
   const runOpts = small && opts.mode === "size" ? { ...opts, max_scale: 1 } : opts;
@@ -275,6 +295,11 @@ async function convert(it, opts) {
   }
   // 엔진은 EXIF의 GPS만 지운다. XMP에 들어 있는 GPS(라이트룸 등에서 내보낸 사진)도 지운다.
   if (enc.found && !opts.keep_gps) enc.found.buf = scrubGps(enc.found.buf).bytes;
+  // 그래도 원본보다 크면 원본을 그대로 쓴다
+  if (enc.found && isJpeg(data) && enc.found.buf.length >= data.length) {
+    const info = jpegInfo(data);
+    if (info.w && info.h) return keepOriginal(info);
+  }
   return { ...enc, lean, seconds: seconds() };
 }
 
@@ -386,7 +411,7 @@ function renderDone(it) {
   const pct = Math.round(100 * (1 - r.size / it.file.size));
   $("saved").textContent = r.kept ? (r.gpsRemoved ? "화질은 그대로, 위치 정보만 지웠어요" : "다시 압축할 필요가 없었어요")
     : pct > 0 ? `${pct}% 가벼워졌어요` : pct === 0 ? "용량이 거의 같아요" : `원본보다 ${-pct}% 커졌어요`;
-  const same = r.kept || o.mode === "original";
+  const same = r.kept || o.mode === "original" || (it.src.w === it.out.w && it.src.h === it.out.h);
   $("factList").innerHTML = [
     ["용도", o.preset === "custom" ? `직접 설정 (${o.target}MB)` : o.label],
     ["해상도", same ? `${koPixels(it.src.w, it.src.h)} 화소 (그대로)` : `${koPixels(it.src.w, it.src.h)} → ${koPixels(it.out.w, it.out.h)} 화소`],
@@ -448,12 +473,12 @@ function renderDone(it) {
 
 let countToken = 0;
 
-// 원본을 그대로 둔 사진이 새 설정에서도 그대로 남는가 (용량 상한·긴 변 제한 안)
+// 원본을 그대로 둔 사진이 새 설정에서도 그대로 남는가 (용량 상한 안)
 function wouldKeep(it, now) {
-  const p = PRESETS[now.preset], size = it.file.size, edge = Math.max(it.src.w, it.src.h);
+  const p = PRESETS[now.preset], size = it.file.size;
   if (!p) return size <= (now.target + TOL) * MB;
   if (p.mode === "original") return false;
-  if (p.mode === "edge") return size <= p.max_mb * MB && edge <= p.long_edge;
+  if (p.mode === "edge") return size <= p.max_mb * MB;
   return size <= (p.target + TOL) * MB;
 }
 
@@ -631,8 +656,10 @@ function shareFile(it) {
 function renderTitle() {
   const done = items.filter(i => i.status === "done" || i.status === "fail").length;
   const busy = items.some(i => i.status === "work" || i.status === "wait");
+  const ok = items.filter(i => i.status === "done").length, bad = items.length - ok;
   document.title = busy ? `(${done}/${items.length}) Photo Optimizer`
-    : items.length ? `✓ ${items.filter(i => i.status === "done").length}장 완료 · Photo Optimizer` : "Photo Optimizer";
+    : !items.length ? "Photo Optimizer"
+    : [ok && `✓ ${ok}장 완료`, bad && `${bad}장 실패`, "Photo Optimizer"].filter(Boolean).join(" · ");
 }
 
 // ---------- 모두 저장: 각각 또는 ZIP ----------
