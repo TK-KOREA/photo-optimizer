@@ -41,7 +41,7 @@ def main() -> None:
         dst.write_bytes(buf)
         d = r.to_dict()
         print(f"[완료] {f.name}: {d['src_megapixels']}MP {d['src_size_mb']}MB → "
-              f"{d['megapixels']}MP {d['size_mb']}MB (Q{r.quality}, {r.seconds}s) {r.note}")
+              f"{d['megapixels']}MP {d['size_mb']}MB ({'원본 유지' if r.kept else f'Q{r.quality}'}, {r.seconds}s) {r.note}")
 
 
 if __name__ == "__main__":

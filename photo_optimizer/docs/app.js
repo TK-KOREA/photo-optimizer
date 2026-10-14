@@ -1,4 +1,6 @@
 // 화면 처리. 변환은 worker.js가 이 기기 안에서 한다.
+// ?v= 는 index.html의 버전과 맞춘다 (캐시에 남은 옛 파일과 섞이지 않게)
+import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=8";
 const $ = id => document.getElementById(id);
 const MB = 1048576;
 const TOL = 3;  // 목표 용량 ± 허용 오차 (MB)
@@ -12,7 +14,9 @@ let queue = Promise.resolve();
 // ---------- 작은 도우미 ----------
 const fmtMb = n => (n / MB).toFixed(1);
 const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const outName = name => name.replace(/\.[^.]+$/, "") + "_optimized.jpg";
+// Windows에서 쓸 수 없는 문자는 바꾼다 (ZIP을 풀 때 실패하지 않게)
+const safeName = s => s.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/, "") || "photo";
+const outName = name => safeName(name.replace(/\.[^.]+$/, "")) + "_optimized.jpg";
 const blobUrl = (buf, type) => URL.createObjectURL(new Blob([buf], { type }));
 // 199.8MP → "2억", 49.9MP → "4,990만"
 function koPixels(w, h) {
@@ -35,27 +39,57 @@ const INFO = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor
 
 // ---------- 목표 용량: 하나만 고르고 ±3MB 허용 ----------
 const targetInput = $("targetMb");
+// 1~47 사이의 정수만 받는다. 칸에 보이는 값과 실제로 쓰는 값이 항상 같아야 한다.
 function target() {
-  const t = Math.round(+targetInput.value);
-  return t >= 1 && t <= 47 ? t : null;
+  const v = targetInput.value.trim(), t = Number(v);
+  return v !== "" && Number.isInteger(t) && t >= 1 && t <= 47 ? t : null;
 }
 function showTarget() {
   const t = target();
-  $("targetRange").textContent = t ? `${Math.max(0.5, t - TOL)}–${t + TOL}MB 안에서 맞춥니다` : "1~47MB 사이로 정해 주세요";
-  $("minus").disabled = !t || t <= 1;
-  $("plus").disabled = !t || t >= 47;
+  $("targetRange").textContent = t ? `${Math.max(0.5, t - TOL)}–${t + TOL}MB 안에서 맞춥니다` : "1~47 사이의 정수로 정해 주세요";
+  $("targetRange").classList.toggle("bad", !t);
+  $("minus").disabled = t !== null && t <= 1;
+  $("plus").disabled = t !== null && t >= 47;
   targetInput.style.width = `${String(targetInput.value || "0").length + 0.2}ch`;
 }
-$("minus").onclick = () => { targetInput.value = Math.max(1, (target() ?? 8) - 1); showTarget(); };
-$("plus").onclick = () => { targetInput.value = Math.min(47, (target() ?? 6) + 1); showTarget(); };
+// 잘못된 값은 가장 가까운 허용값으로 바로잡는다 (빈칸이면 기본 7)
+function normalizeTarget() {
+  const v = targetInput.value.trim(), t = Number(v);
+  targetInput.value = v === "" || !Number.isFinite(t) ? 7 : Math.min(47, Math.max(1, Math.round(t)));
+  showTarget();
+  return +targetInput.value;
+}
+$("minus").onclick = () => { targetInput.value = Math.max(1, normalizeTarget() - 1); showTarget(); };
+$("plus").onclick = () => { targetInput.value = Math.min(47, normalizeTarget() + 1); showTarget(); };
 targetInput.oninput = showTarget;
-targetInput.onblur = () => { if (!target()) targetInput.value = 7; showTarget(); };
+targetInput.onblur = normalizeTarget;
+targetInput.onkeydown = e => { if (e.key === "Enter") normalizeTarget(); };
 showTarget();
 
-// 옵션 패널: 바깥을 누르면 닫는다
-// 펼침 메뉴(옵션, 모두 저장): 바깥을 누르면 닫는다
-document.addEventListener("click", e => {
-  for (const d of [$("opts"), $("saveAll")]) if (!d.contains(e.target)) d.open = false;
+// 넣는 순간의 설정을 사진마다 고정한다 (대기 중에 설정을 바꿔도 이미 넣은 사진은 그대로)
+function currentOpts() {
+  const t = normalizeTarget();
+  return {
+    min_mb: Math.max(0.5, t - TOL), max_mb: t + TOL, target: t,
+    min_q: 85, max_q: 95, max_scale: 0.5,
+    sharpen: $("sharpen").checked, keep_gps: !$("stripGps").checked,
+  };
+}
+
+// 펼침 메뉴(옵션, 모두 저장): 바깥을 누르거나 Esc를 누르면 닫는다
+const menus = [$("opts"), $("saveAll")];
+document.addEventListener("click", e => { for (const d of menus) if (!d.contains(e.target)) d.open = false; });
+addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  for (const d of menus) if (d.open) { d.open = false; d.querySelector("summary").focus(); }
+});
+
+// 변환 중이거나 아직 저장하지 않은 결과가 있으면 새로고침·닫기 전에 확인한다 (결과는 메모리에만 있다)
+addEventListener("beforeunload", e => {
+  if (items.some(i => i.status === "work" || i.status === "wait" || (i.status === "done" && !i.saved))) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
 });
 
 // ---------- 파일 받기 ----------
@@ -84,10 +118,10 @@ function addFiles(list) {
   if (!supported) return;
   const files = [...list].filter(f => /^image\//.test(f.type) || /\.(jpe?g|png|webp|tiff?)$/i.test(f.name));
   if (!files.length) return;
-  const first = items.length;
+  const first = items.length, opts = currentOpts();
   follow = true;
   for (const file of files) {
-    const it = { file, name: file.name, status: "wait", p: 0 };
+    const it = { file, name: file.name, status: "wait", p: 0, opts };
     items.push(it);
     queue = queue.then(() => run(it));  // 메모리 보호를 위해 한 장씩 순서대로
   }
@@ -116,24 +150,40 @@ function step(msg, transfer, onMsg) {
 // core.py의 convert와 같은 흐름: 배율마다 축소 → Q 탐색, 상한 안에 들면 멈춘다
 async function convert(it, opts) {
   const t0 = performance.now();
+  const seconds = () => Math.round((performance.now() - t0) / 1000);
   const data = new Uint8Array(await it.file.arrayBuffer());
+  const small = data.length <= opts.max_mb * MB;
+  // 이미 상한 안의 JPEG는 다시 압축하지 않는다. 다시 압축하면 해상도만 잃거나 오히려 커진다.
+  // 위치 정보 지우기가 켜져 있으면 픽셀은 그대로 두고 GPS만 지운다.
+  if (small && isJpeg(data)) {
+    const info = jpegInfo(data);
+    if (info.w && info.h) {
+      const { bytes, removed } = opts.keep_gps ? { bytes: data, removed: false } : scrubGps(data);
+      it.src = it.out = { w: info.w, h: info.h };
+      return { kept: true, gpsRemoved: removed, found: { q: null, buf: bytes }, seconds: seconds() };
+    }
+  }
+  // JPEG가 아니어도 이미 상한 안이면 해상도를 줄이지 않고 원래 크기부터 시작한다
+  const runOpts = small ? { ...opts, max_scale: 1 } : opts;
   const onMsg = m => progress(it, m);
   let scales, shrunk, enc, lean = false;
   for (let i = 0; ; i++) {
     const input = data.slice();  // 넘긴 버퍼는 워커로 옮겨지므로 배율마다 복사
-    shrunk = await step({ op: "resize", data: input, scale: scales?.[i], ...opts }, [input.buffer], onMsg);
+    shrunk = await step({ op: "resize", data: input, scale: scales?.[i], ...runOpts }, [input.buffer], onMsg);
     scales = shrunk.scales;
     it.src = { w: shrunk.srcW, h: shrunk.srcH };
     it.out = { w: shrunk.width, h: shrunk.height };
     const last = i === scales.length - 1;
     enc = await step({
       op: "encode", pixels: shrunk.pixels, meta: shrunk.meta, width: shrunk.width, height: shrunk.height,
-      bands: shrunk.bands, opts, scale: shrunk.scale, last,
+      bands: shrunk.bands, opts: runOpts, scale: shrunk.scale, last,
     }, [shrunk.pixels.buffer], onMsg);
     lean ||= enc.lean;
     if (enc.found || last) break;
   }
-  return { ...enc, lean, seconds: Math.round((performance.now() - t0) / 1000) };
+  // 엔진은 EXIF의 GPS만 지운다. XMP에 들어 있는 GPS(라이트룸 등에서 내보낸 사진)도 지운다.
+  if (enc.found && !opts.keep_gps) enc.found.buf = scrubGps(enc.found.buf).bytes;
+  return { ...enc, lean, seconds: seconds() };
 }
 
 // 진행률: 읽고 줄이기 0→45%(시간에 따라 서서히), 화질 찾기는 시도마다 계단식, 완료 100%
@@ -153,22 +203,17 @@ setInterval(() => {
 }, 200);
 
 async function run(it) {
-  const t = target() ?? 7;
-  const opts = {
-    min_mb: Math.max(0.5, t - TOL), max_mb: t + TOL, target: t,
-    min_q: 85, max_q: 95, max_scale: 0.5,
-    sharpen: $("sharpen").checked, keep_gps: !$("stripGps").checked,
-  };
-  it.opts = opts;
+  const opts = it.opts;
   it.status = "work"; it.phase = "resize"; it.p = 1;
   if (follow) sel = items.indexOf(it);
   render();
   try {
     const r = await convert(it, opts);
     const f = r.found;
-    it.result = { q: f.q, size: f.buf.length, over: !!f.over, lean: r.lean, seconds: r.seconds };
+    it.result = { q: f.q, size: f.buf.length, over: !!f.over, lean: r.lean, seconds: r.seconds, kept: !!r.kept, gpsRemoved: r.gpsRemoved };
     it.blob = new Blob([f.buf], { type: "image/jpeg" });
     it.url = URL.createObjectURL(it.blob);
+    if (r.kept) it.preview = it.url;  // 원본 JPEG는 그대로 화면에 띄울 수 있다
     if (r.ref) { it.ref = blobUrl(r.ref, "image/png"); it.res = blobUrl(r.res, "image/png"); }
     it.status = "done"; it.p = 100; it.fresh = true;
   } catch (e) {
@@ -219,18 +264,21 @@ function renderWork(it) {
 
 function renderDone(it) {
   const r = it.result, o = it.opts;
-  const mb = r.size / MB, inRange = !r.over && mb >= o.min_mb;
+  const mb = r.size / MB, inRange = r.kept || (!r.over && mb >= o.min_mb);
   $("okLine").className = "ok" + (inRange ? "" : " warnc");
-  $("okLine").innerHTML = (inRange ? CHECK : INFO) + (inRange ? `목표 ${o.target}MB ± ${TOL}MB 안에 들어왔습니다`
+  $("okLine").innerHTML = (inRange ? CHECK : INFO) + (
+    r.kept ? (mb < o.min_mb ? "이미 목표보다 작아 원본을 그대로 두었습니다" : "이미 목표 크기 안이라 원본을 그대로 두었습니다")
+    : inRange ? `목표 ${o.target}MB ± ${TOL}MB 안에 들어왔습니다`
     : r.over ? "목표보다 큽니다" : "목표보다 작게 나왔습니다");
-  $("fromMb").textContent = fmtMb(it.file.size) + "MB";
+  $("fromMb").textContent = r.kept ? "" : fmtMb(it.file.size) + "MB";
   const pct = Math.round(100 * (1 - r.size / it.file.size));
-  $("saved").textContent = pct > 0 ? `${pct}% 가벼워졌어요` : "원본보다 크지 않게 맞췄어요";
+  $("saved").textContent = r.kept ? (r.gpsRemoved ? "화질은 그대로, 위치 정보만 지웠어요" : "다시 압축할 필요가 없었어요")
+    : pct > 0 ? `${pct}% 가벼워졌어요` : pct === 0 ? "용량이 거의 같아요" : `원본보다 ${-pct}% 커졌어요`;
   $("factList").innerHTML = [
-    ["해상도", `${koPixels(it.src.w, it.src.h)} → ${koPixels(it.out.w, it.out.h)} 화소`],
+    ["해상도", r.kept ? `${koPixels(it.src.w, it.src.h)} 화소 (그대로)` : `${koPixels(it.src.w, it.src.h)} → ${koPixels(it.out.w, it.out.h)} 화소`],
     ["크기", `${it.out.w} × ${it.out.h}`],
-    ["JPEG 품질", r.q],
-    ["촬영 위치", o.keep_gps ? "유지" : "지움"],
+    ["JPEG 품질", r.kept ? "원본 그대로" : r.q],
+    ["촬영 위치", o.keep_gps ? "유지" : r.kept && !r.gpsRemoved ? "원래 없음" : "지움"],
     ["걸린 시간", `${r.seconds}초`],
   ].map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v))}</dd>`).join("");
   const notes = [];
@@ -242,6 +290,7 @@ function renderDone(it) {
 
   const save = $("saveBtn");
   save.href = it.url; save.download = outName(it.name);
+  save.onclick = () => { it.saved = true; };
   save.textContent = `저장 · ${fmtMb(r.size)}MB`;
   $("tagRes").textContent = `결과 ${fmtMb(r.size)}MB`;
 
@@ -377,12 +426,14 @@ const viewer = (() => {
 
   // 이미지가 바뀌거나 상자 크기가 바뀌면(화면 전환·회전) 다시 맞춘다. 확대 중이면 배율은 유지한다.
   imgs[0].addEventListener("load", reset);
-  new ResizeObserver(() => {
+  const refit = () => {
     if (!cmp.offsetWidth) return;
     const keep = zoomed() ? s : null;
     reset();
     if (keep) zoomAt(keep, ...center());
-  }).observe(cmp);
+  };
+  new ResizeObserver(refit).observe(cmp);
+  addEventListener("resize", refit);  // 화면을 그리지 않는 동안에는 ResizeObserver가 늦을 수 있어 함께 받는다
 
   return { reset };
 })();
@@ -393,10 +444,16 @@ $("modeBtn").onclick = () => {
   if (!whole) viewer.reset();
 };
 
+function badge(it) {
+  if (it.result.kept) return "그대로";
+  const pct = Math.round(100 * (1 - it.result.size / it.file.size));
+  return pct >= 0 ? `−${pct}%` : `+${-pct}%`;
+}
+
 function renderStrip() {
   $("stripWrap").hidden = items.length < 2;
   $("strip").innerHTML = items.map((it, i) => {
-    const inner = it.status === "done" ? `<img src="${it.preview || it.url}" alt=""><span class="badge">−${Math.max(0, Math.round(100 * (1 - it.result.size / it.file.size)))}%</span>`
+    const inner = it.status === "done" ? `<img src="${it.preview || it.url}" alt=""><span class="badge">${badge(it)}</span>`
       : it.status === "fail" ? `<span class="badge bad">실패</span>`
       : it.status === "work" ? (it.preview ? `<img src="${it.preview}" alt="">` : "") + `<span class="spin"></span>`
       : `<span class="wait">대기</span>`;
@@ -434,6 +491,7 @@ function download(href, name) {
 $("saveEach").onclick = async () => {
   $("saveAll").open = false;
   const done = items.filter(i => i.status === "done");
+  done.forEach(i => { i.saved = true; });
   for (const [k, it] of done.entries()) {
     if (k) await new Promise(r => setTimeout(r, 400));
     download(it.url, outName(it.name));
@@ -442,7 +500,9 @@ $("saveEach").onclick = async () => {
 // ZIP은 무압축으로 묶는다 (JPEG는 다시 압축해도 줄지 않는다)
 $("saveZip").onclick = async () => {
   $("saveAll").open = false;
-  const zip = await makeZip(items.filter(i => i.status === "done").map(i => ({ name: outName(i.name), blob: i.blob })));
+  const done = items.filter(i => i.status === "done");
+  done.forEach(i => { i.saved = true; });
+  const zip = await makeZip(done.map(i => ({ name: outName(i.name), blob: i.blob })));
   const url = URL.createObjectURL(zip);
   download(url, "photo-optimizer.zip");
   setTimeout(() => URL.revokeObjectURL(url), 60000);

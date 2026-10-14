@@ -138,8 +138,10 @@ function run(file, li) {
         meta.textContent = mb(file.size);
         return resolve();
       }
-      meta.innerHTML = `${r.src_megapixels}MP → <b>${r.megapixels}MP</b> (${r.width}×${r.height}) · `
-        + `${r.src_size_mb}MB → <b>${r.size_mb}MB</b> · 품질 ${r.quality} · ${r.saved_pct}% 절감`;
+      meta.innerHTML = r.kept
+        ? `${r.megapixels}MP (${r.width}×${r.height}) · <b>${r.size_mb}MB</b> · 원본 그대로`
+        : `${r.src_megapixels}MP → <b>${r.megapixels}MP</b> (${r.width}×${r.height}) · `
+          + `${r.src_size_mb}MB → <b>${r.size_mb}MB</b> · 품질 ${r.quality} · ${r.saved_pct}% 절감`;
       if (r.note) meta.insertAdjacentHTML("afterend", `<div class="note">${esc(r.note)}</div>`);
       li.firstElementChild.insertAdjacentHTML("beforeend",
         `<a class="btn" href="/api/download/${r.id}" download="${esc(r.filename)}">받기</a>`);
