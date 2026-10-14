@@ -138,9 +138,9 @@ function withLeanRetry(fn) {
 }
 
 const PREVIEW_PX = 1600;
-const CROP_W = 1200, CROP_H = 900;
+const CROP_W = 1600, CROP_H = 1200;
 
-// "실제 크기로 비교"용 같은 영역 두 장 (가운데, 결과 픽셀 1:1).
+// "실제 크기로 비교"용 같은 영역 두 장 (가운데 1600×1200, 결과 픽셀 1:1). 화면에서 최대 800%까지 확대한다.
 // ref는 JPEG로 압축하기 직전 픽셀(= 원본을 같은 크기로 본 모습), res는 실제 결과 JPEG를 디코딩한 것.
 // 둘 다 무손실 PNG로 넘겨 비교에 다른 손실이 끼지 않게 한다.
 function makeViews(s, img, buf) {

@@ -53,7 +53,10 @@ targetInput.onblur = () => { if (!target()) targetInput.value = 7; showTarget();
 showTarget();
 
 // 옵션 패널: 바깥을 누르면 닫는다
-document.addEventListener("click", e => { if (!$("opts").contains(e.target)) $("opts").open = false; });
+// 펼침 메뉴(옵션, 모두 저장): 바깥을 누르면 닫는다
+document.addEventListener("click", e => {
+  for (const d of [$("opts"), $("saveAll")]) if (!d.contains(e.target)) d.open = false;
+});
 
 // ---------- 파일 받기 ----------
 if (!supported) {
@@ -94,10 +97,12 @@ function addFiles(list) {
 }
 
 // ---------- 변환 ----------
+// app.js?v=N 과 같은 버전의 worker.js를 쓴다 (index.html의 ?v= 참고)
+const WORKER_URL = `worker.js?v=${new URL(import.meta.url).searchParams.get("v") ?? ""}`;
 // 단계마다 새 워커(= 새 1GB wasm 힙)를 띄우고, 끝나면 버린다. 이유는 worker.js 머리말 참고.
 function step(msg, transfer, onMsg) {
   return new Promise((resolve, reject) => {
-    const w = new Worker("worker.js", { type: "module" });
+    const w = new Worker(WORKER_URL, { type: "module" });
     w.onmessage = ({ data }) => {
       if (data.type === "progress" || data.type === "preview") return onMsg(data);
       w.terminate();
@@ -242,7 +247,10 @@ function renderDone(it) {
 
   $("cmp").classList.toggle("noviews", !it.ref);
   $("fullImg").src = it.preview || it.url;
-  if (it.ref) { $("refImg").src = it.ref; $("resImg").src = it.res; }
+  if (it.ref && $("refImg").dataset.src !== it.ref) {
+    $("refImg").src = $("refImg").dataset.src = it.ref;
+    $("resImg").src = it.res;
+  }
   // 완료 직후 결과 숫자를 원본 용량에서부터 줄여 보인다
   const toEl = $("toMb"), to = r.size / MB, from = it.file.size / MB, token = ++countToken;
   if (it.fresh && !document.hidden && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -264,11 +272,125 @@ function renderDone(it) {
 let countToken = 0;
 
 // 비교: "실제 크기로 비교"(가운데 1200×900, 결과 픽셀 1:1) ↔ "전체 사진"
-const slider = $("slider");
-slider.oninput = () => $("cmp").style.setProperty("--x", slider.value + "%");
+// 확대: 두 장을 같은 변환으로 움직인다. s = 이미지 1픽셀이 화면에서 차지하는 크기 (1 = 100%, 실제 픽셀)
+const viewer = (() => {
+  const cmp = $("cmp"), imgs = [$("refImg"), $("resImg")], slider = $("slider");
+  const MAX = 8, STEPS = [1, 2, 4, 8];
+  let s = 1, tx = 0, ty = 0, fit = 1, x = 50;
+  const box = () => cmp.getBoundingClientRect();
+  const size = () => ({ w: imgs[0].naturalWidth || 1, h: imgs[0].naturalHeight || 1 });
+  const zoomed = () => s > fit * 1.001;
+
+  function apply() {
+    const { width: W, height: H } = box(), { w, h } = size();
+    const dw = w * s, dh = h * s;
+    tx = dw <= W ? (W - dw) / 2 : Math.min(0, Math.max(W - dw, tx));
+    ty = dh <= H ? (H - dh) / 2 : Math.min(0, Math.max(H - dh, ty));
+    for (const im of imgs) {
+      im.style.width = w + "px"; im.style.height = h + "px";
+      im.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
+    }
+    const z = zoomed(), pct = Math.round(s * 100) + "%";
+    cmp.classList.toggle("zoomed", z);
+    cmp.classList.toggle("pixel", s >= 3);  // 크게 키우면 픽셀을 뭉개지 않고 그대로 보여 준다
+    $("zoomLabel").textContent = z ? pct : "맞춤";
+    $("zoomLabel").setAttribute("aria-label", z ? `${pct}, 눌러서 화면에 맞추기` : "화면에 맞춤, 눌러서 100%로");
+    $("zoomOut").disabled = !z;
+    $("zoomIn").disabled = s >= MAX;
+  }
+  // (px, py) 지점을 화면에 고정한 채 배율을 바꾼다
+  function zoomAt(ns, px, py) {
+    ns = Math.min(MAX, Math.max(fit, ns));
+    tx = px - (px - tx) * ns / s; ty = py - (py - ty) * ns / s; s = ns;
+    apply();
+  }
+  const center = () => { const b = box(); return [b.width / 2, b.height / 2]; };
+  function stepZoom(dir) {
+    const next = dir > 0 ? (STEPS.find(v => v > s * 1.01) ?? MAX) : ([...STEPS].reverse().find(v => v < s * 0.99) ?? fit);
+    zoomAt(next, ...center());
+  }
+  function reset() {
+    const { width: W, height: H } = box(), { w, h } = size();
+    fit = Math.max(W / w, H / h);  // 상자를 꽉 채우는 배율
+    s = fit; tx = (W - w * s) / 2; ty = (H - h * s) / 2;  // 가운데 맞춤
+    apply();
+  }
+  const oneToOne = () => Math.max(1, fit * 2);
+  function setX(v) { x = Math.max(2, Math.min(98, v)); cmp.style.setProperty("--x", x + "%"); slider.value = x; }
+
+  $("zoomIn").onclick = () => stepZoom(1);
+  $("zoomOut").onclick = () => stepZoom(-1);
+  $("zoomLabel").onclick = () => (zoomed() ? reset() : zoomAt(oneToOne(), ...center()));
+  slider.oninput = () => setX(+slider.value);
+
+  // 더블클릭(더블탭): 맞춤 ↔ 100%
+  cmp.addEventListener("dblclick", e => {
+    if (e.target.closest("button") || cmp.matches(".whole, .noviews")) return;
+    const b = box();
+    zoomed() ? reset() : zoomAt(oneToOne(), e.clientX - b.left, e.clientY - b.top);
+  });
+  // Ctrl/⌘ + 휠, 트랙패드 핀치(브라우저가 ctrlKey 휠로 보낸다). 일반 휠은 페이지 스크롤에 둔다.
+  cmp.addEventListener("wheel", e => {
+    if (!(e.ctrlKey || e.metaKey) || cmp.matches(".whole, .noviews")) return;
+    e.preventDefault();
+    const b = box();
+    zoomAt(s * Math.exp(-e.deltaY * 0.01), e.clientX - b.left, e.clientY - b.top);
+  }, { passive: false });
+
+  // 끌기: 경계선 근처면 경계선 이동, 확대 상태면 화면 이동, 맞춤 상태면 경계선 이동. 두 손가락은 확대.
+  const pts = new Map();
+  let mode = null, last = null, pinch = null;
+  cmp.addEventListener("pointerdown", e => {
+    if (e.target.closest("button") || cmp.matches(".whole, .noviews")) return;
+    try { cmp.setPointerCapture(e.pointerId); } catch {}
+    pts.set(e.pointerId, [e.clientX, e.clientY]);
+    const b = box();
+    if (pts.size === 2) {
+      const [[x1, y1], [x2, y2]] = [...pts.values()];
+      pinch = { d: Math.hypot(x2 - x1, y2 - y1) || 1, s, cx: (x1 + x2) / 2 - b.left, cy: (y1 + y2) / 2 - b.top };
+      mode = "pinch";
+      return;
+    }
+    const nearBar = Math.abs(e.clientX - b.left - b.width * x / 100) < 28;
+    mode = nearBar || !zoomed() ? "split" : "pan";
+    last = [e.clientX, e.clientY];
+    if (mode === "split") setX((e.clientX - b.left) / b.width * 100);
+    cmp.classList.toggle("panning", mode === "pan");
+  });
+  cmp.addEventListener("pointermove", e => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, [e.clientX, e.clientY]);
+    const b = box();
+    if (mode === "pinch" && pts.size === 2) {
+      const [[x1, y1], [x2, y2]] = [...pts.values()];
+      zoomAt(pinch.s * Math.hypot(x2 - x1, y2 - y1) / pinch.d, pinch.cx, pinch.cy);
+    } else if (mode === "split") setX((e.clientX - b.left) / b.width * 100);
+    else if (mode === "pan") { tx += e.clientX - last[0]; ty += e.clientY - last[1]; last = [e.clientX, e.clientY]; apply(); }
+  });
+  const end = e => {
+    pts.delete(e.pointerId);
+    if (!pts.size) { mode = null; cmp.classList.remove("panning"); }
+    else if (mode === "pinch") { mode = "pan"; last = [...pts.values()][0]; }
+  };
+  cmp.addEventListener("pointerup", end);
+  cmp.addEventListener("pointercancel", end);
+
+  // 이미지가 바뀌거나 상자 크기가 바뀌면(화면 전환·회전) 다시 맞춘다. 확대 중이면 배율은 유지한다.
+  imgs[0].addEventListener("load", reset);
+  new ResizeObserver(() => {
+    if (!cmp.offsetWidth) return;
+    const keep = zoomed() ? s : null;
+    reset();
+    if (keep) zoomAt(keep, ...center());
+  }).observe(cmp);
+
+  return { reset };
+})();
+
 $("modeBtn").onclick = () => {
   const whole = $("cmp").classList.toggle("whole");
   $("modeBtn").textContent = whole ? "실제 크기로 비교" : "전체 사진";
+  if (!whole) viewer.reset();
 };
 
 function renderStrip() {
@@ -283,8 +405,12 @@ function renderStrip() {
   $("strip").querySelectorAll(".thumb[data-i]").forEach(b => b.onclick = () => { sel = +b.dataset.i; follow = false; render(); });
   $("strip").querySelector(".thumb.add").onclick = openPicker;
   const done = items.filter(i => i.status === "done");
-  $("zipBtn").hidden = done.length < 2;
-  $("zipCount").textContent = `(${done.length}장, ZIP)`;
+  $("saveAll").hidden = done.length < 2;
+  if (done.length < 2) $("saveAll").open = false;
+  const total = done.reduce((n, i) => n + i.result.size, 0);
+  $("saveCount").textContent = `(${done.length}장)`;
+  $("saveEachSub").textContent = `JPEG ${done.length}개 · 합계 ${fmtMb(total)}MB`;
+  $("saveZipSub").textContent = `photo-optimizer.zip · ${fmtMb(total)}MB`;
 }
 
 function renderDock(it) {
@@ -297,13 +423,29 @@ function renderDock(it) {
   else { cta.textContent = it.status === "wait" ? "차례를 기다리는 중" : `변환하는 중 · ${Math.round(it.p)}%`; cta.disabled = true; }
 }
 
-// ---------- ZIP (무압축. JPEG는 다시 압축해도 줄지 않는다) ----------
-$("zipBtn").onclick = async () => {
-  const zip = await makeZip(items.filter(i => i.status === "done").map(i => ({ name: outName(i.name), blob: i.blob })));
+// ---------- 모두 저장: 각각 또는 ZIP ----------
+function download(href, name) {
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(zip); a.download = "photo-optimizer.zip";
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  a.href = href; a.download = name;
+  document.body.append(a); a.click(); a.remove();
+}
+// 한꺼번에 누르면 브라우저가 일부를 막으므로 간격을 두고 차례로 받는다.
+// 처음 한 번은 브라우저가 "여러 파일 다운로드"를 허용할지 물을 수 있다.
+$("saveEach").onclick = async () => {
+  $("saveAll").open = false;
+  const done = items.filter(i => i.status === "done");
+  for (const [k, it] of done.entries()) {
+    if (k) await new Promise(r => setTimeout(r, 400));
+    download(it.url, outName(it.name));
+  }
+};
+// ZIP은 무압축으로 묶는다 (JPEG는 다시 압축해도 줄지 않는다)
+$("saveZip").onclick = async () => {
+  $("saveAll").open = false;
+  const zip = await makeZip(items.filter(i => i.status === "done").map(i => ({ name: outName(i.name), blob: i.blob })));
+  const url = URL.createObjectURL(zip);
+  download(url, "photo-optimizer.zip");
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 };
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
