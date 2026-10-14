@@ -34,5 +34,29 @@
       "type": "image/svg+xml",
       "purpose": "any"
     }
-  ]
+  ],
+  "share_target": {
+    "action": "./share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "files": [
+        {
+          "name": "photos",
+          "accept": [
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "image/tiff",
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+            ".tif",
+            ".tiff"
+          ]
+        }
+      ]
+    }
+  }
 }

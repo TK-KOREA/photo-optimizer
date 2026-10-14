@@ -61,7 +61,7 @@ function resize({ data, scale, max_scale, sharpen, keep_gps }) {
     img = s.add(img.autorot());  // EXIF 회전 정보를 실제 픽셀에 반영
     const srcW = img.width, srcH = img.height;
     if (srcW * srcH > MAX_PIXELS) {
-      throw new UserError(`${Math.round(srcW * srcH / 1e6)}MP 이미지는 브라우저에서 처리할 수 없습니다 (최대 ${MAX_PIXELS / 1e6}MP).`);
+      throw new UserError(`3억 화소까지 줄일 수 있어요. 이 사진은 ${(srcW * srcH / 1e8).toFixed(1).replace(/\.0$/, "")}억 화소예요.`);
     }
     const scales = pickScales(srcW, srcH, max_scale);
     scale ??= scales[0];
@@ -204,8 +204,8 @@ onmessage = async ({ data: msg }) => {
     postMessage({
       type: "error",
       error: e instanceof UserError ? text
-        : /memory|alloc|out of bounds/i.test(text) ? "기기 메모리가 부족합니다. PC 브라우저나 PC 프로그램을 이용해 주세요."
-        : "지원하지 않는 형식이거나 손상된 파일입니다.",
+        : /memory|alloc|out of bounds/i.test(text) ? "이 기기에서는 메모리가 부족해요. PC에서 열어 주세요."
+        : "이 파일은 열 수 없어요. JPEG·PNG·WebP·TIFF 사진인지 확인해 주세요.",
       detail: text,
     });
   }

@@ -13,16 +13,16 @@
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-title" content="Photo Optimizer">
 <script>window.coi = { coepCredentialless: () => false };</script>
-<script src="coi-serviceworker.js"></script>
+<script src="sw.js"></script>
 <link rel="stylesheet" href="vendor/pretendard/pretendardvariable-dynamic-subset.css">
 <!-- 배포할 때 ?v= 를 올리면 브라우저 캐시에 남은 옛 파일과 섞이지 않는다 -->
-<link rel="stylesheet" href="style.css?v=8">
+<link rel="stylesheet" href="style.css?v=11">
 </head>
 <body data-s="empty">
 
 <header class="nav">
   <div class="brand"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5ac8fa"/><stop offset="1" stop-color="#5856d6"/></linearGradient></defs><rect width="26" height="26" rx="7" fill="url(#lg)"/><path d="M7 17.5 11 13l3 3 2-2 3 3.5" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="17" cy="9" r="1.8" fill="#fff"/></svg>Photo Optimizer</div>
-  <div class="lock"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.5 7V5a3.5 3.5 0 0 1 7 0v2h.5A1.5 1.5 0 0 1 13.5 8.5v5A1.5 1.5 0 0 1 12 15H4a1.5 1.5 0 0 1-1.5-1.5v-5A1.5 1.5 0 0 1 4 7zm1.5 0h4V5a2 2 0 1 0-4 0z"/></svg><span>사진은 이 기기를 떠나지 않습니다</span></div>
+  <div class="lock"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.5 7V5a3.5 3.5 0 0 1 7 0v2h.5A1.5 1.5 0 0 1 13.5 8.5v5A1.5 1.5 0 0 1 12 15H4a1.5 1.5 0 0 1-1.5-1.5v-5A1.5 1.5 0 0 1 4 7zm1.5 0h4V5a2 2 0 1 0-4 0z"/></svg><span>사진은 이 기기를 떠나지 않아요</span></div>
 </header>
 
 <section class="hero">
@@ -31,7 +31,7 @@
 </section>
 
 <main>
-  <div class="warn" id="unsupported" hidden>이 브라우저에서는 변환할 수 없습니다. 최신 Chrome·Edge·Safari·Firefox로 열어 주세요. 시크릿 모드에서는 동작하지 않을 수 있습니다.</div>
+  <div class="warn" id="unsupported" hidden>이 브라우저에서는 쓸 수 없어요. 최신 Chrome·Edge·Safari·Firefox로 열어 주세요. 시크릿 모드에서는 안 될 수 있어요.</div>
 
   <div class="stage" id="stage">
     <!-- 처음 -->
@@ -39,7 +39,7 @@
       <div class="stack" aria-hidden="true"><i></i><i></i><i></i></div>
       <h2>사진을 여기에 놓으세요</h2>
       <span class="btn">사진 선택</span>
-      <p class="hint">JPEG · PNG · WebP · TIFF · 여러 장 가능<span class="kbd-hint"> · <kbd>Ctrl</kbd>+<kbd>V</kbd>로 붙여넣기</span></p>
+      <p class="hint">JPEG · PNG · WebP · TIFF · 여러 장 가능</p>
     </div>
 
     <!-- 변환 중 -->
@@ -77,6 +77,7 @@
         <div class="saved" id="saved"></div>
         <dl class="tnum" id="factList"></dl>
         <p class="note" id="note" hidden></p>
+        <button class="redo" type="button" id="redoBtn" hidden></button>
         <div class="actions">
           <button class="btn ghost lg" type="button" data-add>사진 추가</button>
           <a class="btn lg" id="saveBtn" download>저장</a>
@@ -136,11 +137,12 @@
 <div class="dock" id="dock">
   <div class="in">
     <button class="cta alt" type="button" data-add aria-label="사진 추가" hidden>+</button>
+    <button class="cta alt" type="button" id="shareBtn" aria-label="보내기" hidden><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7.5 7.5 12 3l4.5 4.5"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/></svg></button>
     <button class="cta" type="button" id="cta">사진 고르기</button>
   </div>
 </div>
 
 <input type="file" id="pick" accept="image/jpeg,image/png,image/webp,image/tiff" multiple hidden>
-<script type="module" src="app.js?v=8"></script>
+<script type="module" src="app.js?v=11"></script>
 </body>
 </html>

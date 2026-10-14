@@ -138,6 +138,10 @@ kbd { font: 500 12px var(--font); padding: 1px 6px; border-radius: 5px; backgrou
 .facts dl { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line); display: grid; grid-template-columns: auto 1fr; gap: 11px 20px; font-size: 15px; }
 .facts dt { color: var(--sub); }
 .facts dd { text-align: right; font-weight: 500; }
+.redo { margin-top: 16px; align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 16px;
+        border-radius: 980px; background: var(--blue-soft); color: var(--blue); font-size: 15px; font-weight: 600; }
+.redo::before { content: "↻"; font-size: 17px; }
+.redo:hover { background: color-mix(in srgb, var(--blue) 22%, transparent); }
 .note { margin-top: 16px; font-size: 13px; line-height: 1.5; color: var(--orange); }
 .actions { margin-top: auto; padding-top: 28px; display: flex; gap: 10px; }
 .actions .btn { flex: 1; padding: 0 16px; }
@@ -218,7 +222,7 @@ footer { text-align: center; color: var(--sub); font-size: 12px; margin-top: 44p
   main { padding: 0 16px calc(108px + env(safe-area-inset-bottom)); }
   .stage { border-radius: 24px; }
   .empty { height: 340px; }
-  .empty .btn, .kbd-hint { display: none; }
+  .empty .btn { display: none; }
   .work { height: 360px; }
   .work .status { left: 20px; right: 20px; bottom: 20px; }
   .work .step { font-size: 22px; }
@@ -227,6 +231,15 @@ footer { text-align: center; color: var(--sub); font-size: 12px; margin-top: 44p
   .facts { padding: 22px 22px 24px; }
   .to { font-size: 46px; }
   .facts .actions { display: none; }
+  .redo { align-self: stretch; justify-content: center; }
+  /* 엄지로 누르는 것들은 44px 이상 */
+  .cmp .zoom { height: 48px; }
+  .cmp .zoom button { height: 44px; min-width: 44px; }
+  .cmp .zoom #zoomLabel { min-width: 56px; }
+  .pillbtn { height: 44px; padding: 0 16px; }
+  .stepper button { width: 44px; height: 44px; }
+  .opts summary { height: 44px; }
+  .saveall summary { height: 44px; }
   .controls { justify-content: flex-start; }
   .target { justify-content: flex-start; }
   /* 옵션은 휴대폰에서 떠 있는 창 대신 그 자리에서 펼친다 (화면 밖으로 나가거나 아래 버튼에 가리지 않게) */
@@ -240,6 +253,7 @@ footer { text-align: center; color: var(--sub); font-size: 12px; margin-top: 44p
          display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; transition: transform .1s, opacity .2s; }
   .cta:active { transform: scale(.98); }
   .cta:disabled { opacity: .45; cursor: default; }
+  .cta.alt svg { display: block; }
   .cta.alt { flex: none; width: 56px; background: var(--card); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); font-size: 26px; font-weight: 400; }
 }
 @media (prefers-reduced-motion: reduce) {

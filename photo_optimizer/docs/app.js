@@ -1,6 +1,6 @@
 // 화면 처리. 변환은 worker.js가 이 기기 안에서 한다.
 // ?v= 는 index.html의 버전과 맞춘다 (캐시에 남은 옛 파일과 섞이지 않게)
-import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=8";
+import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=11";
 const $ = id => document.getElementById(id);
 const MB = 1048576;
 const TOL = 3;  // 목표 용량 ± 허용 오차 (MB)
@@ -46,11 +46,12 @@ function target() {
 }
 function showTarget() {
   const t = target();
-  $("targetRange").textContent = t ? `${Math.max(0.5, t - TOL)}–${t + TOL}MB 안에서 맞춥니다` : "1~47 사이의 정수로 정해 주세요";
+  $("targetRange").textContent = t ? `${Math.max(0.5, t - TOL)}–${t + TOL}MB로 맞춰요` : "1~47 사이의 정수로 정해 주세요";
   $("targetRange").classList.toggle("bad", !t);
   $("minus").disabled = t !== null && t <= 1;
   $("plus").disabled = t !== null && t >= 47;
   targetInput.style.width = `${String(targetInput.value || "0").length + 0.2}ch`;
+  if (items[sel]?.status === "done") renderDone(items[sel]);  // "다시 줄이기" 버튼 갱신
 }
 // 잘못된 값은 가장 가까운 허용값으로 바로잡는다 (빈칸이면 기본 7)
 function normalizeTarget() {
@@ -65,6 +66,14 @@ targetInput.oninput = showTarget;
 targetInput.onblur = normalizeTarget;
 targetInput.onkeydown = e => { if (e.key === "Enter") normalizeTarget(); };
 showTarget();
+
+// 지금 화면의 설정 (입력칸을 고치지 않고 읽기만). 값이 잘못됐으면 null
+function peekOpts() {
+  const t = target();
+  return t && { target: t, keep_gps: !$("stripGps").checked, sharpen: $("sharpen").checked };
+}
+$("stripGps").addEventListener("change", showTarget);
+$("sharpen").addEventListener("change", showTarget);
 
 // 넣는 순간의 설정을 사진마다 고정한다 (대기 중에 설정을 바꿔도 이미 넣은 사진은 그대로)
 function currentOpts() {
@@ -94,9 +103,14 @@ addEventListener("beforeunload", e => {
 
 // ---------- 파일 받기 ----------
 if (!supported) {
-  // coi-serviceworker가 첫 방문 때 페이지를 한 번 새로 고친다. 그래도 안 되면 브라우저 문제.
+  // sw.js(coi-serviceworker)가 첫 방문 때 페이지를 한 번 새로 고친다. 그래도 안 되면 브라우저 문제.
   setTimeout(() => { if (!window.crossOriginIsolated) $("unsupported").hidden = false; }, 3000);
 }
+// 예전 coi-serviceworker.js가 등록된 기기도 공유 받기가 되는 sw.js로 바꾼다.
+// sw.js의 창 쪽 코드는 이미 격리된 페이지에서는 등록을 건너뛰기 때문에 여기서 직접 한다.
+const swc = navigator.serviceWorker;
+if (swc?.controller && !swc.controller.scriptURL.endsWith("/sw.js")) swc.register("sw.js").catch(e => console.warn(e));
+
 const pick = $("pick"), drop = $("drop");
 const openPicker = () => supported && pick.click();
 pick.onchange = () => { addFiles(pick.files); pick.value = ""; };
@@ -113,6 +127,21 @@ addEventListener("paste", e => {
   const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
   if (files.length) addFiles(files);
 });
+
+// 갤러리의 "공유"로 들어온 사진: sw.js가 Cache Storage에 넣어 둔 파일을 꺼내 바로 시작한다
+async function takeShared() {
+  if (!new URLSearchParams(location.search).has("shared")) return;
+  history.replaceState(null, "", location.pathname);  // 새로고침해도 다시 넣지 않게
+  try {
+    const cache = await caches.open("share-target"), files = [];
+    for (const req of await cache.keys()) {
+      const res = await cache.match(req);
+      files.push(new File([await res.blob()], decodeURIComponent(res.headers.get("x-name") || "shared.jpg"), { type: res.headers.get("content-type") || "" }));
+      await cache.delete(req);
+    }
+    if (files.length) addFiles(files);
+  } catch (e) { console.warn("공유받은 사진을 읽지 못했습니다", e); }
+}
 
 function addFiles(list) {
   if (!supported) return;
@@ -142,7 +171,7 @@ function step(msg, transfer, onMsg) {
       w.terminate();
       data.type === "error" ? reject(data) : resolve(data);
     };
-    w.onerror = e => { w.terminate(); reject({ error: "변환 엔진을 불러오지 못했습니다.", detail: e.message }); };
+    w.onerror = e => { w.terminate(); reject({ error: "변환 엔진을 불러오지 못했어요. 새로고침해 주세요.", detail: e.message }); };
     w.postMessage(msg, transfer);
   });
 }
@@ -173,6 +202,8 @@ async function convert(it, opts) {
     scales = shrunk.scales;
     it.src = { w: shrunk.srcW, h: shrunk.srcH };
     it.out = { w: shrunk.width, h: shrunk.height };
+    it.phase = "prep"; it.p = Math.max(it.p, 46); it.q = null;
+    render();
     const last = i === scales.length - 1;
     enc = await step({
       op: "encode", pixels: shrunk.pixels, meta: shrunk.meta, width: shrunk.width, height: shrunk.height,
@@ -189,7 +220,7 @@ async function convert(it, opts) {
 // 진행률: 읽고 줄이기 0→45%(시간에 따라 서서히), 화질 찾기는 시도마다 계단식, 완료 100%
 function progress(it, m) {
   if (m.type === "preview") { it.preview = blobUrl(m.preview, "image/jpeg"); return render(); }
-  if (m.phase === "resize") { it.phase = "resize"; it.p = Math.max(it.p, m.retry ? 40 : 2); it.q = null; }
+  if (m.phase === "resize") { it.phase = "resize"; it.retry = m.retry; it.p = Math.max(it.p, m.retry ? 40 : 2); it.q = null; }
   if (m.phase === "q") { it.phase = "q"; it.tries = (it.tries || 0) + 1; it.p = Math.min(94, 48 + it.tries * 11); it.q = m; }
   if (m.phase === "lean") { it.lean = true; it.tries = 0; }
   render();
@@ -202,12 +233,16 @@ setInterval(() => {
   }
 }, 200);
 
+const isHeic = f => /\.(heic|heif)$/i.test(f.name) || /^image\/hei[cf]/i.test(f.type);
+const HEIC_MSG = "HEIC 사진은 아직 열 수 없어요. 카메라 설정에서 '고효율 사진'을 끄고 찍거나 JPEG로 저장해 주세요.";
+
 async function run(it) {
   const opts = it.opts;
   it.status = "work"; it.phase = "resize"; it.p = 1;
   if (follow) sel = items.indexOf(it);
   render();
   try {
+    if (isHeic(it.file)) throw { error: HEIC_MSG };
     const r = await convert(it, opts);
     const f = r.found;
     it.result = { q: f.q, size: f.buf.length, over: !!f.over, lean: r.lean, seconds: r.seconds, kept: !!r.kept, gpsRemoved: r.gpsRemoved };
@@ -219,7 +254,7 @@ async function run(it) {
   } catch (e) {
     console.warn(it.name, e.detail || e);
     it.status = "fail";
-    it.error = e.error || "변환에 실패했습니다.";
+    it.error = e.error || "이 파일은 열 수 없어요. JPEG·PNG·WebP·TIFF 사진인지 확인해 주세요.";
   }
   if (follow) sel = items.indexOf(it);
   render();
@@ -234,6 +269,7 @@ function render() {
   if (it?.status === "fail") { $("failName").textContent = it.name; $("failMsg").textContent = it.error; }
   renderStrip();
   renderDock(it);
+  renderTitle();
 }
 
 function renderWork(it) {
@@ -247,18 +283,21 @@ function renderWork(it) {
     }
   } else { img.classList.remove("in"); img.removeAttribute("src"); delete img.dataset.src; }
   let step, detail;
-  if (it.status === "wait") { step = "차례를 기다리는 중"; detail = "앞 사진이 끝나면 바로 시작합니다"; }
+  if (it.status === "wait") { step = "차례를 기다리는 중"; detail = "앞 사진이 끝나면 바로 시작해요"; }
   else if (it.phase === "resize") {
     step = "사진 읽고 줄이는 중";
-    detail = it.src ? `${koPixels(it.src.w, it.src.h)} 화소 · 더 작은 해상도로 다시 맞추는 중` : "고해상도 사진은 30초 안팎 걸립니다";
+    detail = it.retry ? "목표보다 커서 조금 더 작게 줄이는 중" : "고해상도 사진은 30초쯤 걸려요";
+  } else if (it.phase === "prep") {
+    step = "가장 좋은 화질 찾는 중";
+    detail = `${koPixels(it.src.w, it.src.h)} → ${koPixels(it.out.w, it.out.h)} 화소로 줄였어요`;
   } else {
     step = it.lean ? "메모리를 아껴 화질 찾는 중" : "가장 좋은 화질 찾는 중";
-    detail = it.q ? `품질 ${it.q.q} → ${it.q.mb}MB · ${it.q.fits ? "목표 안" : "조금 큼"}` : `${koPixels(it.out.w, it.out.h)} 화소 · ${it.out.w} × ${it.out.h}`;
+    detail = it.q ? `화질 ${it.q.q} · ${it.q.mb}MB, ${it.q.fits ? "목표 안이에요" : "목표보다 커요"}` : `${koPixels(it.out.w, it.out.h)} 화소 · ${it.out.w} × ${it.out.h}`;
   }
   $("workStep").textContent = step;
   $("workDetail").textContent = detail;
   $("workBar").style.width = (it.status === "wait" ? 0 : it.p) + "%";
-  const stage = it.status === "wait" ? -1 : it.phase === "resize" ? 0 : 1;
+  const stage = it.status === "wait" ? -1 : it.phase === "resize" ? 0 : 1;  // prep, q는 "화질 찾기"
   [...$("workDots").children].forEach((li, i) => li.className = i < stage ? "ok" : i === stage ? "on" : "");
 }
 
@@ -267,9 +306,9 @@ function renderDone(it) {
   const mb = r.size / MB, inRange = r.kept || (!r.over && mb >= o.min_mb);
   $("okLine").className = "ok" + (inRange ? "" : " warnc");
   $("okLine").innerHTML = (inRange ? CHECK : INFO) + (
-    r.kept ? (mb < o.min_mb ? "이미 목표보다 작아 원본을 그대로 두었습니다" : "이미 목표 크기 안이라 원본을 그대로 두었습니다")
-    : inRange ? `목표 ${o.target}MB ± ${TOL}MB 안에 들어왔습니다`
-    : r.over ? "목표보다 큽니다" : "목표보다 작게 나왔습니다");
+    r.kept ? "이미 충분히 작아서 그대로 두었어요"
+    : inRange ? `목표 크기(${o.min_mb}–${o.max_mb}MB)에 맞췄어요`
+    : r.over ? "목표보다 커요" : "목표보다 작게 나왔어요");
   $("fromMb").textContent = r.kept ? "" : fmtMb(it.file.size) + "MB";
   const pct = Math.round(100 * (1 - r.size / it.file.size));
   $("saved").textContent = r.kept ? (r.gpsRemoved ? "화질은 그대로, 위치 정보만 지웠어요" : "다시 압축할 필요가 없었어요")
@@ -277,16 +316,27 @@ function renderDone(it) {
   $("factList").innerHTML = [
     ["해상도", r.kept ? `${koPixels(it.src.w, it.src.h)} 화소 (그대로)` : `${koPixels(it.src.w, it.src.h)} → ${koPixels(it.out.w, it.out.h)} 화소`],
     ["크기", `${it.out.w} × ${it.out.h}`],
-    ["JPEG 품질", r.kept ? "원본 그대로" : r.q],
+    ["화질(JPEG)", r.kept ? "원본 그대로" : r.q],
     ["촬영 위치", o.keep_gps ? "유지" : r.kept && !r.gpsRemoved ? "원래 없음" : "지움"],
     ["걸린 시간", `${r.seconds}초`],
   ].map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v))}</dd>`).join("");
   const notes = [];
-  if (r.over) notes.push("가장 작은 해상도와 최저 품질로도 상한을 넘었습니다. 목표 용량을 늘려 보세요.");
-  else if (!inRange) notes.push("최고 품질로도 이 크기입니다. 원본에 담긴 정보가 적은 사진이라 더 키울 필요가 없습니다.");
-  if (r.lean) notes.push("기기 메모리가 부족해 메모리를 아끼는 방식으로 저장했습니다.");
+  if (r.over) notes.push("가장 작게 줄여도 목표보다 커요. 목표 용량을 늘려 보세요.");
+  else if (!inRange) notes.push("더 키워도 화질이 나아지지 않아 이 크기로 저장했어요.");
+  if (r.lean) notes.push("기기 메모리가 부족해 메모리를 아끼는 방식으로 저장했어요.");
   $("note").hidden = !notes.length;
   $("note").textContent = notes.join(" ");
+
+  // 지금 설정이 이 사진을 넣을 때와 다르면 같은 파일을 새 설정으로 다시 줄일 수 있게 한다
+  const now = peekOpts(), redo = $("redoBtn");
+  let changed = now && (now.target !== o.target || now.keep_gps !== o.keep_gps || now.sharpen !== o.sharpen);
+  // 원본을 그대로 둔 사진은 새 상한에도 들어가고 위치 정보 설정이 같으면 다시 해도 결과가 같다
+  if (changed && r.kept && it.file.size <= (now.target + TOL) * MB && now.keep_gps === o.keep_gps) changed = false;
+  redo.hidden = !changed;
+  if (changed) {
+    redo.textContent = now.target !== o.target ? `${now.target}MB로 다시 줄이기` : "바뀐 옵션으로 다시 줄이기";
+    redo.onclick = () => addFiles([it.file]);
+  }
 
   const save = $("saveBtn");
   save.href = it.url; save.download = outName(it.name);
@@ -477,7 +527,25 @@ function renderDock(it) {
   if (!it) { cta.textContent = "사진 고르기"; cta.onclick = openPicker; }
   else if (it.status === "done") { cta.textContent = `저장 · ${fmtMb(it.result.size)}MB`; cta.onclick = () => $("saveBtn").click(); }
   else if (it.status === "fail") { cta.textContent = "다른 사진 고르기"; cta.onclick = openPicker; }
-  else { cta.textContent = it.status === "wait" ? "차례를 기다리는 중" : `변환하는 중 · ${Math.round(it.p)}%`; cta.disabled = true; }
+  else { cta.textContent = it.status === "wait" ? "차례를 기다리는 중" : `줄이는 중 · ${Math.round(it.p)}%`; cta.disabled = true; }
+  // 보내기: 이 기기가 파일 공유를 지원할 때만 (카카오톡·메일 등 OS 공유 창)
+  const share = $("shareBtn"), file = it?.status === "done" && shareFile(it);
+  share.hidden = !file;
+  if (file) share.onclick = () => navigator.share({ files: [file] }).then(() => { it.saved = true; }, () => {});
+}
+
+function shareFile(it) {
+  if (!navigator.canShare) return null;
+  it.shareFile ??= new File([it.blob], outName(it.name), { type: "image/jpeg" });
+  return navigator.canShare({ files: [it.shareFile] }) ? it.shareFile : null;
+}
+
+// 탭 제목에 진행 상황: 다른 탭에서 일하다가도 끝났는지 알 수 있게
+function renderTitle() {
+  const done = items.filter(i => i.status === "done" || i.status === "fail").length;
+  const busy = items.some(i => i.status === "work" || i.status === "wait");
+  document.title = busy ? `(${done}/${items.length}) Photo Optimizer`
+    : items.length ? `✓ ${items.filter(i => i.status === "done").length}장 완료 · Photo Optimizer` : "Photo Optimizer";
 }
 
 // ---------- 모두 저장: 각각 또는 ZIP ----------
@@ -551,3 +619,4 @@ async function makeZip(files) {
 }
 
 render();
+takeShared();
