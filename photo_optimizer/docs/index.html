@@ -16,7 +16,7 @@
 <script src="sw.js"></script>
 <link rel="stylesheet" href="vendor/pretendard/pretendardvariable-dynamic-subset.css">
 <!-- 배포할 때 ?v= 를 올리면 브라우저 캐시에 남은 옛 파일과 섞이지 않는다 -->
-<link rel="stylesheet" href="style.css?v=17">
+<link rel="stylesheet" href="style.css?v=18">
 </head>
 <body data-s="empty">
 
@@ -127,7 +127,7 @@
       <span class="rng tnum" id="targetRange"></span>
     </div>
     <div class="opts" id="opts" role="group" aria-label="옵션">
-      <label class="row"><span>촬영 위치 지우기<small>공유할 때 찍은 장소가 드러나지 않게</small></span><input type="checkbox" class="sw" id="stripGps" checked></label>
+      <label class="row"><span>촬영 위치 지우기<small>공유할 때 찍은 장소가 드러나지 않게</small></span><input type="checkbox" class="sw" id="stripGps"></label>
       <label class="row"><span>선명하게 보정<small>줄인 뒤 아주 약하게 또렷하게</small></span><input type="checkbox" class="sw" id="sharpen"></label>
     </div>
   </div>
@@ -146,6 +146,6 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 <input type="file" id="pick" accept="image/jpeg,image/png,image/webp,image/tiff" multiple hidden>
-<script type="module" src="app.js?v=17"></script>
+<script type="module" src="app.js?v=18"></script>
 </body>
 </html>

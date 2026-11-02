@@ -1,6 +1,6 @@
 // 화면 처리. 변환은 worker.js가 이 기기 안에서 한다.
 // ?v= 는 index.html의 버전과 맞춘다 (캐시에 남은 옛 파일과 섞이지 않게)
-import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=17";
+import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=18";
 const $ = id => document.getElementById(id);
 const MB = 1048576;
 const TOL = 3;  // 목표 용량 ± 허용 오차 (MB)

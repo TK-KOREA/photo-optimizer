@@ -47,6 +47,23 @@ function stripGps(s, img) {
   return out;
 }
 
+// EXIF 방향값 (없으면 1). 5~8이면 가로·세로가 바뀐다
+function orientation(img) {
+  const fields = img.getFields();
+  let has = false;
+  for (let i = 0; i < fields.size(); i++) if (fields.get(i) === "orientation") has = true;
+  fields.delete();
+  const o = has ? img.getInt("orientation") : 1;
+  return o >= 1 && o <= 8 ? o : 1;
+}
+
+// 투명 배경은 흰색으로 채우고 sRGB(또는 흑백)로 맞춘다
+function toSrgb(s, img) {
+  if (img.hasAlpha()) img = s.add(img.flatten({ background: [255, 255, 255] }));
+  if (img.interpretation !== "srgb" && img.interpretation !== "b-w") img = s.add(img.colourspace("srgb"));
+  return img;
+}
+
 // 긴 변을 long_edge px 이하로 맞추는 배율. 상한을 못 맞추면 85%, 70%로 한 단계씩 더 줄인다
 function edgeScales(w, h, longEdge) {
   const s = Math.min(1, longEdge / Math.max(w, h));
@@ -64,9 +81,11 @@ function pickScales(w, h, maxScale) {
 function resize({ data, scale, max_scale, long_edge, sharpen, keep_gps }) {
   const s = new Scope();
   try {
+    // EXIF 회전은 축소한 뒤 메모리에 올린 결과에 반영한다. 순차 읽기 원본을 먼저 돌리면
+    // 줄 순서가 어긋나 축소 없이(배율 1) 읽을 때 실패한다
     let img = s.add(vips.Image.newFromBuffer(data, "", { access: "sequential" }));
-    img = s.add(img.autorot());  // EXIF 회전 정보를 실제 픽셀에 반영
-    const srcW = img.width, srcH = img.height;
+    const turned = orientation(img) >= 5;
+    const srcW = turned ? img.height : img.width, srcH = turned ? img.width : img.height;
     if (srcW * srcH > MAX_PIXELS) {
       throw new UserError(`3억 화소까지 줄일 수 있어요. 이 사진은 ${(srcW * srcH / 1e8).toFixed(1).replace(/\.0$/, "")}억 화소예요.`);
     }
@@ -74,14 +93,16 @@ function resize({ data, scale, max_scale, long_edge, sharpen, keep_gps }) {
     scale ??= scales[0];
 
     // 선형 광(linear light) 공간에서 Lanczos3로 축소한다 (core.py의 _resize와 동일)
-    if (img.hasAlpha()) img = s.add(img.flatten({ background: [255, 255, 255] }));
-    if (img.interpretation !== "srgb" && img.interpretation !== "b-w") img = s.add(img.colourspace("srgb"));
-    if (!keep_gps) img = stripGps(s, img);
+    img = toSrgb(s, img);
     // 메타데이터만 담은 1×1 JPEG. encode 워커가 이 이미지의 메타데이터를 결과에 붙인다.
     // 원본은 순차 읽기라 픽셀을 먼저 읽으면 안 된다. 검은 점을 덮어 그 1×1만 잘라 저장한다
-    // (다중 입력 연산은 첫 입력 img의 메타데이터를 물려받고, 픽셀은 덮은 점에서만 읽는다).
-    const dot = s.add(vips.Image.black(1, 1, { bands: img.bands }));
-    const meta = s.add(s.add(img.insert(dot, 0, 0)).crop(0, 0, 1, 1)).jpegsaveBuffer({ Q: 50, keep: 1 | 2 | 4 | 8 });
+    // (다중 입력 연산은 첫 입력의 메타데이터를 물려받고, 픽셀은 덮은 점에서만 읽는다).
+    // 픽셀은 돌려서 넘기므로 방향값은 1로 둔다.
+    let base = s.add(img.copy());
+    base.setInt("orientation", 1);
+    if (!keep_gps) base = stripGps(s, base);
+    const dot = s.add(vips.Image.black(1, 1, { bands: base.bands }));
+    const meta = s.add(s.add(base.insert(dot, 0, 0)).crop(0, 0, 1, 1)).jpegsaveBuffer({ Q: 50, keep: 1 | 2 | 4 | 8 });
 
     let out = img;
     if (scale < 1) {
@@ -89,6 +110,7 @@ function resize({ data, scale, max_scale, long_edge, sharpen, keep_gps }) {
     }
     if (sharpen) out = s.add(out.sharpen({ sigma: 0.5, x1: 2, m1: 0, m2: 2 }));
     out = s.add(out.cast("uchar"));
+    if (orientation(img) > 1) out = s.add(s.add(out.copyMemory()).autorot());
     const pixels = out.writeToMemory();
     return { srcW, srcH, scales, scale, width: out.width, height: out.height, bands: out.bands, pixels, meta };
   } finally {
@@ -119,11 +141,7 @@ function reencode({ data, sharpen, keep_gps }) {
     if (img.width * img.height > MAX_PIXELS) {
       throw new UserError(`3억 화소까지 줄일 수 있어요. 이 사진은 ${(img.width * img.height / 1e8).toFixed(1).replace(/\.0$/, "")}억 화소예요.`);
     }
-    const fields = img.getFields(), names = [];
-    for (let i = 0; i < fields.size(); i++) names.push(fields.get(i));
-    fields.delete();
-    const orient = names.includes("orientation") ? img.getInt("orientation") : 1;
-    const turned = orient >= 5 && orient <= 8;
+    const turned = orientation(img) >= 5;
     const srcW = turned ? img.height : img.width, srcH = turned ? img.width : img.height;
     // 회전은 픽셀을 돌리지 않고 EXIF 방향값으로 남긴다 (90도 회전은 이미지 전체를 메모리에 올려야 한다)
     if (img.hasAlpha()) img = s.add(img.flatten({ background: [255, 255, 255] }));

@@ -56,7 +56,7 @@ async def api_convert(
     preset: str = Form(DEFAULT_PRESET),          # original | archive | messenger | mail | custom
     target_mb: float = Form(DEFAULT_TARGET_MB),  # preset=custom일 때만 쓴다
     sharpen: bool = Form(False),
-    keep_gps: bool = Form(False),
+    keep_gps: bool = Form(True),
 ):
     if preset != "custom" and preset not in PRESETS:
         raise HTTPException(400, "알 수 없는 용도입니다.")

@@ -23,7 +23,7 @@ def main() -> None:
     p.add_argument("--target", type=float, dest="target_mb",
                    help=f"직접 설정: 목표 용량 MB (±{TOLERANCE_MB:g}MB 허용). 주면 --preset 대신 쓴다")
     p.add_argument("--sharpen", action="store_true", help="축소 후 약한 샤프닝")
-    p.add_argument("--keep-gps", action="store_true", help="위치 정보 유지")
+    p.add_argument("--strip-gps", action="store_true", help="위치 정보 지우기 (기본은 유지)")
     a = p.parse_args()
 
     files = []
@@ -33,7 +33,7 @@ def main() -> None:
     if a.target_mb is not None and not 1 <= a.target_mb <= 47:
         p.error("--target은 1~47 사이로 정해 주세요")
     preset = "custom" if a.target_mb is not None else a.preset
-    opts = preset_options(preset, a.target_mb, sharpen=a.sharpen, keep_gps=a.keep_gps)
+    opts = preset_options(preset, a.target_mb, sharpen=a.sharpen, keep_gps=not a.strip_gps)
     for f in files:
         out_dir = a.out or f.parent
         out_dir.mkdir(parents=True, exist_ok=True)

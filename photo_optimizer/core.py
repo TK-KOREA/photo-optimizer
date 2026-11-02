@@ -10,7 +10,7 @@
   1. 해상도는 원본의 1/2(2억 → 5천만 화소)부터 시도한다.
   2. 각 해상도에서 JPEG 품질(Q)을 이진 탐색해 상한 용량 이하의 최고 Q를 찾는다.
   3. 최저 Q(min_q)로도 상한을 넘으면 해상도를 한 단계 낮춘다.
-이미 상한 안의 JPEG는 다시 압축하지 않는다(해상도만 잃거나 오히려 커진다). 위치 정보만 지운다.
+이미 상한 안의 JPEG는 다시 압축하지 않는다(해상도만 잃거나 오히려 커진다). 위치 정보 지우기를 켰으면 그것만 지운다.
 결과가 원본 JPEG보다 크면 원본을 그대로 쓴다.
 """
 from __future__ import annotations
@@ -54,14 +54,14 @@ class Options:
     max_q: int = 95
     max_scale: float = 0.5   # 원본 대비 최대 배율 (1.0이면 축소 안 함부터 시도)
     sharpen: bool = False    # 축소 후 약한 출력 샤프닝
-    keep_gps: bool = False   # False면 위치 정보 제거
+    keep_gps: bool = True    # False면 위치 정보 제거
     preset: str = DEFAULT_PRESET  # 결과 표시용 (직접 설정이면 "custom")
     mode: str = "size"            # size | edge | original
     long_edge: int = 0            # edge 모드의 긴 변 상한(px)
 
 
 def preset_options(preset: str = DEFAULT_PRESET, target_mb: float | None = None,
-                   sharpen: bool = False, keep_gps: bool = False) -> Options:
+                   sharpen: bool = False, keep_gps: bool = True) -> Options:
     """프리셋 이름(또는 "custom" + 목표 용량)을 변환 옵션으로 바꾼다."""
     common = dict(preset=preset, sharpen=sharpen, keep_gps=keep_gps)
     if preset == "custom":
@@ -177,8 +177,9 @@ def scrub_gps(data: bytes) -> tuple[bytes, bool]:
 
 
 def _load(data: bytes) -> pyvips.Image:
-    img = pyvips.Image.new_from_buffer(data, "", access="sequential")
-    return img.autorot()  # EXIF 회전 정보를 실제 픽셀에 반영
+    # EXIF 회전은 _resize가 축소한 뒤 반영한다. 순차 읽기 원본을 먼저 돌리면
+    # 줄 순서가 어긋나 축소 없이(배율 1) 읽을 때 실패한다
+    return pyvips.Image.new_from_buffer(data, "", access="sequential")
 
 
 def _resize(img: pyvips.Image, scale: float, sharpen: bool) -> pyvips.Image:
@@ -203,7 +204,10 @@ def _resize(img: pyvips.Image, scale: float, sharpen: bool) -> pyvips.Image:
     out = out.cast("uchar")
     # 이후 Q 탐색에서 여러 번 인코딩하므로 축소 결과를 메모리에 고정한다
     # (5천만 화소 기준 약 150MB)
-    return out.copy_memory()
+    out = out.copy_memory()
+    if "orientation" in out.get_fields() and out.get("orientation") > 1:
+        out = out.autorot().copy_memory()  # EXIF 회전 정보를 실제 픽셀에 반영
+    return out
 
 
 def _strip_gps(img: pyvips.Image) -> pyvips.Image:
@@ -306,7 +310,7 @@ def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
         return _keep_original(data, opts, t0)
 
     src = _load(data)
-    src_w, src_h = src.width, src.height
+    src_w, src_h = _oriented_size(src)
 
     if opts.mode == "edge":
         # 긴 변을 long_edge 이하로. 상한을 못 맞추면 85%, 70%로 한 단계씩 더 줄인다
