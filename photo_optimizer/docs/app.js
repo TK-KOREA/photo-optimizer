@@ -1,6 +1,6 @@
 // 화면 처리. 변환은 worker.js가 이 기기 안에서 한다.
 // ?v= 는 index.html의 버전과 맞춘다 (캐시에 남은 옛 파일과 섞이지 않게)
-import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=18";
+import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=19";
 const $ = id => document.getElementById(id);
 const MB = 1048576;
 const TOL = 3;  // 목표 용량 ± 허용 오차 (MB)
@@ -249,12 +249,13 @@ async function convert(it, opts) {
   const t0 = performance.now();
   const seconds = () => Math.round((performance.now() - t0) / 1000);
   const data = new Uint8Array(await it.file.arrayBuffer());
+  const gpsIn = scrubGps(data).removed;
   const onMsg = m => progress(it, m);
   // 원본을 그대로 돌려줄 때: 위치 정보 지우기가 켜져 있으면 픽셀은 그대로 두고 GPS만 지운다
   const keepOriginal = info => {
     const { bytes, removed } = opts.keep_gps ? { bytes: data, removed: false } : scrubGps(data);
     it.src = it.out = { w: info.w, h: info.h };
-    return { kept: true, gpsRemoved: removed, found: { q: null, buf: bytes }, seconds: seconds() };
+    return { kept: true, gpsRemoved: removed, gpsIn, found: { q: null, buf: bytes }, seconds: seconds() };
   };
 
   // 원본 해상도: 해상도 그대로 다시 저장. 원본보다 커지면 원본을 그대로 쓴다
@@ -264,7 +265,7 @@ async function convert(it, opts) {
     const buf = opts.keep_gps ? r.buf : scrubGps(r.buf).bytes;
     if (isJpeg(data) && buf.length >= data.length) return keepOriginal({ w: r.srcW, h: r.srcH });
     it.src = it.out = { w: r.srcW, h: r.srcH };
-    return { found: { q: r.q, buf }, preview: r.preview, ref: r.ref, res: r.res, seconds: seconds() };
+    return { found: { q: r.q, buf }, gpsIn, preview: r.preview, ref: r.ref, res: r.res, seconds: seconds() };
   }
 
   // 이미 용량 상한 안의 JPEG는 다시 압축하지 않는다. 긴 변 프리셋도 마찬가지다: 상한 안이면
@@ -300,7 +301,7 @@ async function convert(it, opts) {
     const info = jpegInfo(data);
     if (info.w && info.h) return keepOriginal(info);
   }
-  return { ...enc, lean, seconds: seconds() };
+  return { ...enc, lean, gpsIn, seconds: seconds() };
 }
 
 // 진행률: 읽고 줄이기 0→45%(시간에 따라 서서히), 화질 찾기는 시도마다 계단식, 완료 100%
@@ -334,7 +335,9 @@ async function run(it) {
     if (isHeic(it.file)) throw { error: HEIC_MSG };
     const r = await convert(it, opts);
     const f = r.found;
-    it.result = { q: f.q, size: f.buf.length, over: !!f.over, lean: r.lean, seconds: r.seconds, kept: !!r.kept, gpsRemoved: r.gpsRemoved };
+    it.result = { q: f.q, size: f.buf.length, over: !!f.over, lean: r.lean, seconds: r.seconds, kept: !!r.kept, gpsRemoved: r.gpsRemoved,
+      // 위치 정보가 실제로 들어 있는지 (설정과 별개로 받은 사진과 결과를 직접 본다)
+      gpsIn: r.gpsIn, gpsOut: scrubGps(f.buf).removed };
     it.blob = new Blob([f.buf], { type: "image/jpeg" });
     it.url = URL.createObjectURL(it.blob);
     if (r.kept) it.preview = it.url;  // 원본 JPEG는 그대로 화면에 띄울 수 있다
@@ -417,10 +420,13 @@ function renderDone(it) {
     ["해상도", same ? `${koPixels(it.src.w, it.src.h)} 화소 (그대로)` : `${koPixels(it.src.w, it.src.h)} → ${koPixels(it.out.w, it.out.h)} 화소`],
     ["크기", `${it.out.w} × ${it.out.h}`],
     ["화질(JPEG)", r.kept ? "원본 그대로" : r.q],
-    ["촬영 위치", o.keep_gps ? "유지" : r.kept && !r.gpsRemoved ? "원래 없음" : "지움"],
+    ["촬영 위치", !r.gpsIn ? "원본에 없음" : r.gpsOut ? "유지" : "지움"],
     ["걸린 시간", `${r.seconds}초`],
   ].map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v))}</dd>`).join("");
   const notes = [];
+  // 휴대폰이 사진을 웹페이지에 넘길 때 위치를 빼는 경우가 많다 (안드로이드 사진 선택기, 아이폰 사파리)
+  if (o.keep_gps && !r.gpsIn && (it.file.type === "image/jpeg" || /\.jpe?g$/i.test(it.name)))
+    notes.push("받은 사진에 위치 정보가 없어요. 휴대폰이 사진을 넘길 때 위치를 뺐을 수 있어요.");
   if (r.over) notes.push(o.mode === "size" ? "가장 작게 줄여도 목표보다 커요. 목표 용량을 늘려 보세요." : "가장 작게 줄여도 목표보다 커요. 다른 용도를 골라 보세요.");
   else if (!inRange && o.mode === "size") notes.push("더 키워도 화질이 나아지지 않아 이 크기로 저장했어요.");
   if (r.lean) notes.push("기기 메모리가 부족해 메모리를 아끼는 방식으로 저장했어요.");
