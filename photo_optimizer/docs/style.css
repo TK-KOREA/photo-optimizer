@@ -143,6 +143,9 @@ kbd { font: 500 12px var(--font); padding: 1px 6px; border-radius: 5px; backgrou
 .redo::before { content: "↻"; font-size: 17px; }
 .redo:hover { background: color-mix(in srgb, var(--blue) 22%, transparent); }
 .note { margin-top: 16px; font-size: 13px; line-height: 1.5; color: var(--orange); }
+.gpshelp { margin-top: 16px; font-size: 13px; line-height: 1.5; color: var(--sub); }
+.gpshelp p:first-child { color: var(--orange); }
+.gpshelp .linkbtn { margin-left: -6px; }
 .actions { margin-top: auto; padding-top: 28px; display: flex; gap: 10px; }
 .actions .btn { flex: 1; padding: 0 16px; }
 

@@ -1,6 +1,6 @@
 // 화면 처리. 변환은 worker.js가 이 기기 안에서 한다.
 // ?v= 는 index.html의 버전과 맞춘다 (캐시에 남은 옛 파일과 섞이지 않게)
-import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=19";
+import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=20";
 const $ = id => document.getElementById(id);
 const MB = 1048576;
 const TOL = 3;  // 목표 용량 ± 허용 오차 (MB)
@@ -169,6 +169,9 @@ if (swc?.controller && !swc.controller.scriptURL.endsWith("/sw.js")) swc.registe
 const pick = $("pick"), drop = $("drop");
 const openPicker = () => supported && pick.click();
 pick.onchange = () => { addFiles(pick.files); pick.value = ""; };
+const pickFile = $("pickFile");
+pickFile.onchange = () => { addFiles(pickFile.files); pickFile.value = ""; };
+$("pickFileBtn").onclick = () => supported && pickFile.click();
 drop.onclick = openPicker;
 drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPicker(); } };
 document.querySelectorAll("[data-add]").forEach(b => b.addEventListener("click", openPicker));
@@ -423,10 +426,9 @@ function renderDone(it) {
     ["촬영 위치", !r.gpsIn ? "원본에 없음" : r.gpsOut ? "유지" : "지움"],
     ["걸린 시간", `${r.seconds}초`],
   ].map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v))}</dd>`).join("");
-  const notes = [];
   // 휴대폰이 사진을 웹페이지에 넘길 때 위치를 빼는 경우가 많다 (안드로이드 사진 선택기, 아이폰 사파리)
-  if (o.keep_gps && !r.gpsIn && (it.file.type === "image/jpeg" || /\.jpe?g$/i.test(it.name)))
-    notes.push("받은 사진에 위치 정보가 없어요. 휴대폰이 사진을 넘길 때 위치를 뺐을 수 있어요.");
+  $("gpsHelp").hidden = !(o.keep_gps && !r.gpsIn && (it.file.type === "image/jpeg" || /\.jpe?g$/i.test(it.name)));
+  const notes = [];
   if (r.over) notes.push(o.mode === "size" ? "가장 작게 줄여도 목표보다 커요. 목표 용량을 늘려 보세요." : "가장 작게 줄여도 목표보다 커요. 다른 용도를 골라 보세요.");
   else if (!inRange && o.mode === "size") notes.push("더 키워도 화질이 나아지지 않아 이 크기로 저장했어요.");
   if (r.lean) notes.push("기기 메모리가 부족해 메모리를 아끼는 방식으로 저장했어요.");

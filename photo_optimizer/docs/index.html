@@ -16,7 +16,7 @@
 <script src="sw.js"></script>
 <link rel="stylesheet" href="vendor/pretendard/pretendardvariable-dynamic-subset.css">
 <!-- 배포할 때 ?v= 를 올리면 브라우저 캐시에 남은 옛 파일과 섞이지 않는다 -->
-<link rel="stylesheet" href="style.css?v=19">
+<link rel="stylesheet" href="style.css?v=20">
 </head>
 <body data-s="empty">
 
@@ -77,6 +77,11 @@
         <div class="saved" id="saved"></div>
         <dl class="tnum" id="factList"></dl>
         <p class="note" id="note" hidden></p>
+        <div class="gpshelp" id="gpsHelp" hidden>
+          <p>받은 사진에 위치 정보가 없어요. 휴대폰이 사진을 넘길 때 위치를 뺐을 수 있어요.</p>
+          <p>위치를 살리려면 사진 앱 대신 파일에서 고르세요: <b>내 파일 → DCIM → Camera</b></p>
+          <button class="linkbtn" type="button" id="pickFileBtn">파일에서 다시 고르기</button>
+        </div>
         <button class="redo" type="button" id="redoBtn" hidden></button>
         <div class="actions">
           <button class="btn ghost lg" type="button" data-add>사진 추가</button>
@@ -146,6 +151,8 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 <input type="file" id="pick" accept="image/jpeg,image/png,image/webp,image/tiff" multiple hidden>
-<script type="module" src="app.js?v=19"></script>
+<!-- 형식을 정하지 않으면 안드로이드가 사진 선택기(위치를 뺀다) 대신 파일 선택기를 띄운다 -->
+<input type="file" id="pickFile" multiple hidden>
+<script type="module" src="app.js?v=20"></script>
 </body>
 </html>
