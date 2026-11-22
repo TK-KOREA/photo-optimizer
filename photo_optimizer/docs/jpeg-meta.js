@@ -232,3 +232,136 @@ export function putGps(u8, gps) {
   out.set(tail, head.length + 4 + seg.length);
   return out;
 }
+
+// 실제 촬영 위치가 들어 있는지. 안드로이드는 위치 읽기 권한이 없는 앱(브라우저 포함)에 사진을 넘길 때
+// GPS 항목은 남기고 위도·경도 값만 0으로 채운다. 그런 사진은 위치가 없는 것으로 본다.
+export function hasLocation(u8) {
+  const gps = readGps(u8);
+  const real = tag => gps?.find(g => g.tag === tag)?.bytes.some(b => b !== 0);
+  if (real(2) || real(4)) return true;
+  // XMP에만 위치가 있는 사진(라이트룸 등에서 내보낸 사진)
+  return !gps && scrubGps(u8).removed;
+}
+
+// ---------- HDR 게인맵 (Ultra HDR) ----------
+// 갤럭시·픽셀의 HDR 사진은 보통 JPEG 뒤에 밝기 배율을 담은 작은 흑백 JPEG(게인맵)를 하나 더 붙인다.
+// 본 사진의 XMP(hdrgm, Container)와 MPF(APP2)가 그 위치를 가리킨다. 변환 엔진은 본 사진만 읽어 쓰므로
+// 게인맵을 따로 꺼내 두었다가, 줄인 게인맵을 결과에 다시 붙인다(attachGainMap).
+
+const MPF_ID = "MPF\0";
+const ISO_GM_ID = "urn:iso:std:iso:ts:21496:-1\0";
+const segBytes = (u8, s) => u8.subarray(s.start - 4, s.end);  // 마커부터 끝까지
+
+// 원본의 게인맵 { gm: 게인맵 JPEG, xmp: 본 사진의 hdrgm XMP 구간, iso: ISO 21496-1 구간 | null }. 없으면 null
+export function readGainMap(u8) {
+  if (!isJpeg(u8)) return null;
+  let xmp = null, iso = null, gm = null;
+  for (const s of segments(u8)) {
+    if (s.marker === 0xe1 && latin1(u8, s.start, s.start + XMP_ID.length) === XMP_ID) {
+      const text = latin1(u8, s.start, s.end);
+      if (text.includes("hdrgm:Version") && text.includes("GainMap")) xmp = segBytes(u8, s).slice();
+    } else if (s.marker === 0xe2 && latin1(u8, s.start, s.start + ISO_GM_ID.length) === ISO_GM_ID) {
+      iso = segBytes(u8, s).slice();
+    } else if (s.marker === 0xe2 && latin1(u8, s.start, s.start + 4) === MPF_ID) {
+      const tiff = s.start + 4, { r16, r32 } = tiffReader(u8, tiff);
+      const ifd = tiff + r32(tiff + 4);
+      for (let i = 0, n = r16(ifd); i < n; i++) {
+        const e = ifd + 2 + i * 12;
+        if (r16(e) !== 0xb002 || r32(e + 4) < 32) continue;
+        const list = tiff + r32(e + 8);
+        const size = r32(list + 16 + 4), off = r32(list + 16 + 8);  // 두 번째 이미지
+        if (off && tiff + off + size <= u8.length) gm = u8.slice(tiff + off, tiff + off + size);
+      }
+    }
+  }
+  if (!xmp || !gm || !isJpeg(gm) || !latin1(gm, 0, Math.min(gm.length, 4096)).includes("hdrgm")) return null;
+  return { gm, xmp, iso };
+}
+
+// 게인맵 JPEG 자체의 메타데이터 구간(hdrgm XMP, ISO 21496-1). 다시 인코딩한 게인맵에 옮겨 붙인다
+export function gainMapMeta(gm) {
+  const out = [];
+  for (const s of segments(gm)) {
+    const xmp = s.marker === 0xe1 && latin1(gm, s.start, s.start + XMP_ID.length) === XMP_ID;
+    const iso = s.marker === 0xe2 && latin1(gm, s.start, s.start + ISO_GM_ID.length) === ISO_GM_ID;
+    if (xmp || iso) out.push(segBytes(gm, s).slice());
+  }
+  return out;
+}
+
+// JPEG의 첫 APP0(JFIF) 뒤(없으면 SOI 뒤)에 구간들을 넣는다
+export function insertSegments(u8, segs) {
+  let at = 2;
+  for (const s of segments(u8)) { if (s.marker === 0xe0) at = s.end; break; }
+  return concat([u8.subarray(0, at), ...segs, u8.subarray(at)]);
+}
+
+function concat(parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+function app(marker, payload) {
+  const len = payload.length + 2;
+  return concat([Uint8Array.of(0xff, marker, len >> 8, len & 255), payload]);
+}
+
+// 변환 결과(primary)에 게인맵(gm)을 붙여 Ultra HDR JPEG로 만든다. src = readGainMap(원본)
+export function attachGainMap(primary, gm, src) {
+  if (!isJpeg(primary) || !isJpeg(gm) || !src) return primary;
+  // 결과에 남은 옛 hdrgm XMP·MPF·ISO 구간은 빼고 새로 만든다. 다른 XMP가 있으면 겹치므로 손대지 않는다
+  const keep = [];
+  let lastApp = 2;
+  for (const s of segments(primary)) {
+    const head = latin1(primary, s.start, s.start + 40);
+    const isXmp = s.marker === 0xe1 && head.startsWith(XMP_ID);
+    if (isXmp && !latin1(primary, s.start, s.end).includes("hdrgm")) return primary;
+    const drop = isXmp || (s.marker === 0xe2 && (head.startsWith(MPF_ID) || head.startsWith(ISO_GM_ID)));
+    if (s.marker >= 0xe0 && s.marker <= 0xef) lastApp = s.end;
+    keep.push({ s, drop });
+  }
+  const before = [], after = [];
+  let p = 2;
+  for (const { s, drop } of keep) {
+    if (s.end > lastApp) break;
+    if (!drop) before.push(primary.subarray(s.start - 4, s.end));
+    p = s.end;
+  }
+  after.push(primary.subarray(p));
+
+  // XMP: 게인맵 길이만 새 값으로
+  const xmpText = latin1(src.xmp, 4, src.xmp.length).replace(
+    /(Item:Semantic="GainMap"[^>]*?Item:Length=")\d+(")|(Item:Length=")\d+("[^>]*?Item:Semantic="GainMap")/,
+    (m, a, b, c, d) => a ? `${a}${gm.length}${b}` : `${c}${gm.length}${d}`);
+  const xmp = app(0xe1, Uint8Array.from(xmpText, ch => ch.charCodeAt(0)));
+  const iso = src.iso ? [src.iso] : [];
+
+  // MPF: 이미지 2장(본 사진, 게인맵)의 크기와 위치. 오프셋은 MPF의 TIFF 머리 기준 (리틀엔디언)
+  const mp = new Uint8Array(4 + 82);
+  const dv = new DataView(mp.buffer);
+  mp.set([0x4d, 0x50, 0x46, 0, 0x49, 0x49, 0x2a, 0], 0);
+  dv.setUint32(8, 8, true);
+  dv.setUint16(12, 3, true);
+  const entry = (i, tag, type, count, value) => {
+    const e = 14 + i * 12;
+    dv.setUint16(e, tag, true); dv.setUint16(e + 2, type, true); dv.setUint32(e + 4, count, true);
+    if (typeof value === "string") mp.set(Uint8Array.from(value, c => c.charCodeAt(0)), e + 8);
+    else dv.setUint32(e + 8, value, true);
+  };
+  entry(0, 0xb000, 7, 4, "0100");
+  entry(1, 0xb001, 4, 1, 2);
+  entry(2, 0xb002, 7, 32, 50);
+  dv.setUint32(14 + 36, 0, true);  // 다음 IFD 없음
+
+  const head = concat([primary.subarray(0, 2), ...before]);
+  const total = head.length + xmp.length + iso.reduce((n, s) => n + s.length, 0) + (mp.length + 4) + after[0].length;
+  const tiffAbs = head.length + xmp.length + iso.reduce((n, s) => n + s.length, 0) + 4 + 4;
+  // MP 항목 (16바이트씩): 속성, 크기, 오프셋, 종속 이미지 2개
+  const list = 4 + 50;
+  dv.setUint32(list, 0x030000, true); dv.setUint32(list + 4, total, true); dv.setUint32(list + 8, 0, true);
+  dv.setUint32(list + 16, 0, true); dv.setUint32(list + 20, gm.length, true); dv.setUint32(list + 24, total - tiffAbs, true);
+  const mpfSeg = app(0xe2, mp);
+  return concat([head, xmp, ...iso, mpfSeg, after[0], gm]);
+}

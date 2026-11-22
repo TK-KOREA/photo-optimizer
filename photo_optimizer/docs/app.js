@@ -1,6 +1,6 @@
 // 화면 처리. 변환은 worker.js가 이 기기 안에서 한다.
 // ?v= 는 index.html의 버전과 맞춘다 (캐시에 남은 옛 파일과 섞이지 않게)
-import { isJpeg, jpegInfo, scrubGps, readGps, putGps } from "./jpeg-meta.js?v=21";
+import { isJpeg, jpegInfo, scrubGps, readGps, putGps, hasLocation, readGainMap, gainMapMeta, insertSegments, attachGainMap } from "./jpeg-meta.js?v=25";
 const $ = id => document.getElementById(id);
 const MB = 1048576;
 const TOL = 3;  // 목표 용량 ± 허용 오차 (MB)
@@ -38,8 +38,10 @@ const INFO = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor
 })();
 
 // ---------- 용도 프리셋 ----------
-// mode: original = 해상도 그대로 다시 저장, size = 목표 용량(±3MB)에 맞춤, edge = 긴 변 N px + 용량 상한
+// mode: original = 해상도 그대로 다시 저장, size = 목표 용량(±3MB)에 맞춤, edge = 긴 변 N px(또는 화소 수 area_mp) + 용량 상한
+// tone: 밝기·대비·채도 자동 보정 (갤럭시 S24 울트라 "사진 리마스터" 결과에 맞춘 값, worker.js autoTone)
 const PRESETS = {
+  remaster:  { label: "리마스터", spec: "1,600만 화소 · 밝기·색 보정", desc: "밝기·대비·색을 자동으로 다듬어 보관·전송하기 좋게", redo: "리마스터로 다시 만들기", mode: "edge", area_mp: 16, max_mb: 8, tone: true, chroma420: true },
   original:  { label: "원본 해상도", spec: "2억 화소 그대로", desc: "해상도는 그대로, 용량만 줄여요 · PC 권장", redo: "원본 해상도로 다시 저장", mode: "original" },
   archive:   { label: "고화질 보관", spec: "5천만 화소 · 4–10MB", desc: "보관·백업·크게 인화할 사진", redo: "고화질 보관으로 다시 줄이기", mode: "size", target: 7 },
   messenger: { label: "카톡·메신저", spec: "1,200만 화소 · 4MB 이하", desc: "메신저로 보내기 좋은 크기", redo: "카톡·메신저용으로 다시 줄이기", mode: "edge", long_edge: 4000, max_mb: 4 },
@@ -135,7 +137,7 @@ function currentOpts() {
     return { ...base, mode: "size", label: `${t}MB`, target: t, min_mb: Math.max(0.5, t - TOL), max_mb: t + TOL };
   }
   if (p.mode === "original") return { ...base, mode: "original", label: p.label, min_mb: 0, max_mb: Infinity };
-  if (p.mode === "edge") return { ...base, mode: "edge", label: p.label, long_edge: p.long_edge, min_mb: 0, max_mb: p.max_mb };
+  if (p.mode === "edge") return { ...base, mode: "edge", label: p.label, long_edge: p.long_edge, area_mp: p.area_mp, tone: !!p.tone, chroma420: !!p.chroma420, min_mb: 0, max_mb: p.max_mb };
   return { ...base, mode: "size", label: p.label, target: p.target, min_mb: p.target - TOL, max_mb: p.target + TOL };
 }
 showPreset();
@@ -252,10 +254,12 @@ async function convert(it, opts) {
   const t0 = performance.now();
   const seconds = () => Math.round((performance.now() - t0) / 1000);
   const data = new Uint8Array(await it.file.arrayBuffer());
-  const gpsIn = scrubGps(data).removed;
+  const gpsIn = hasLocation(data);
   // 변환 전에 원본의 위치 정보를 메모리에 담아 두고, 변환이 끝나면 결과에 다시 넣는다
   const gps = opts.keep_gps ? readGps(data) : null;
   const withGps = buf => (gps ? putGps(buf, gps) : buf);
+  // HDR 사진(게인맵)이면 게인맵도 꺼내 두었다가 결과 크기에 맞춰 다시 붙인다
+  const hdr = readGainMap(data);
   const onMsg = m => progress(it, m);
   // 원본을 그대로 돌려줄 때: 위치 정보 지우기가 켜져 있으면 픽셀은 그대로 두고 GPS만 지운다
   const keepOriginal = info => {
@@ -268,7 +272,9 @@ async function convert(it, opts) {
   if (opts.mode === "original") {
     const input = data.slice();
     const r = await step({ op: "reencode", data: input, sharpen: opts.sharpen, keep_gps: opts.keep_gps }, [input.buffer], onMsg);
-    const buf = opts.keep_gps ? withGps(r.buf) : scrubGps(r.buf).bytes;
+    let buf = opts.keep_gps ? withGps(r.buf) : scrubGps(r.buf).bytes;
+    // 해상도·방향이 그대로이므로 원본 게인맵을 그대로 붙인다
+    if (hdr) buf = attachGainMap(buf, hdr.gm, hdr);
     if (isJpeg(data) && buf.length >= data.length) return keepOriginal({ w: r.srcW, h: r.srcH });
     it.src = it.out = { w: r.srcW, h: r.srcH };
     return { found: { q: r.q, buf }, gpsIn, preview: r.preview, ref: r.ref, res: r.res, seconds: seconds() };
@@ -276,8 +282,9 @@ async function convert(it, opts) {
 
   // 이미 용량 상한 안의 JPEG는 다시 압축하지 않는다. 긴 변 프리셋도 마찬가지다: 상한 안이면
   // 원본이 같은 용량에 해상도가 더 높으니, 다시 압축하면 해상도만 잃거나 오히려 커진다.
+  // 자동 보정(리마스터)은 색이 바뀌므로 원본을 그대로 돌려주지 않는다
   const small = data.length <= opts.max_mb * MB;
-  if (small && isJpeg(data)) {
+  if (small && isJpeg(data) && !opts.tone) {
     const info = jpegInfo(data);
     if (info.w && info.h) return keepOriginal(info);
   }
@@ -302,8 +309,15 @@ async function convert(it, opts) {
   }
   // 엔진은 EXIF의 GPS만 지운다. XMP에 들어 있는 GPS(라이트룸 등에서 내보낸 사진)도 지운다.
   if (enc.found) enc.found.buf = opts.keep_gps ? withGps(enc.found.buf) : scrubGps(enc.found.buf).bytes;
-  // 그래도 원본보다 크면 원본을 그대로 쓴다
-  if (enc.found && isJpeg(data) && enc.found.buf.length >= data.length) {
+  if (enc.found && hdr) {
+    try {
+      const gm = hdr.gm.slice();
+      const r = await step({ op: "gainmap", gm, src: it.src, out: it.out, orientation: jpegInfo(data).orientation }, [gm.buffer], onMsg);
+      enc.found.buf = attachGainMap(enc.found.buf, insertSegments(r.buf, gainMapMeta(hdr.gm)), hdr);
+    } catch (e) { console.warn("HDR 게인맵을 붙이지 못했습니다", e); }  // 게인맵이 없어도 사진은 정상
+  }
+  // 그래도 원본보다 크면 원본을 그대로 쓴다 (자동 보정은 색이 바뀌었으므로 제외)
+  if (enc.found && !opts.tone && isJpeg(data) && enc.found.buf.length >= data.length) {
     const info = jpegInfo(data);
     if (info.w && info.h) return keepOriginal(info);
   }
@@ -343,7 +357,7 @@ async function run(it) {
     const f = r.found;
     it.result = { q: f.q, size: f.buf.length, over: !!f.over, lean: r.lean, seconds: r.seconds, kept: !!r.kept, gpsRemoved: r.gpsRemoved,
       // 위치 정보가 실제로 들어 있는지 (설정과 별개로 받은 사진과 결과를 직접 본다)
-      gpsIn: r.gpsIn, gpsOut: scrubGps(f.buf).removed };
+      gpsIn: r.gpsIn, gpsOut: hasLocation(f.buf) };
     it.blob = new Blob([f.buf], { type: "image/jpeg" });
     it.url = URL.createObjectURL(it.blob);
     if (r.kept) it.preview = it.url;  // 원본 JPEG는 그대로 화면에 띄울 수 있다
@@ -488,7 +502,7 @@ let countToken = 0;
 function wouldKeep(it, now) {
   const p = PRESETS[now.preset], size = it.file.size;
   if (!p) return size <= (now.target + TOL) * MB;
-  if (p.mode === "original") return false;
+  if (p.mode === "original" || p.tone) return false;
   if (p.mode === "edge") return size <= p.max_mb * MB;
   return size <= (p.target + TOL) * MB;
 }

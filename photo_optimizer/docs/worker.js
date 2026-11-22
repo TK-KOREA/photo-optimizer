@@ -70,6 +70,84 @@ function edgeScales(w, h, longEdge) {
   return [s, s * 0.85, s * 0.7];
 }
 
+// 화소 수를 area_mp(백만 화소) 이하로 맞추는 배율. 상한을 못 맞추면 85%, 70%로 한 단계씩 더 줄인다
+function areaScales(w, h, areaMp) {
+  const s = Math.min(1, Math.sqrt(areaMp * 1e6 / (w * h)));
+  return [s, s * 0.85, s * 0.7];
+}
+
+// ---------- 자동 보정 (리마스터) ----------
+// 출발점은 갤럭시 S24 울트라 "사진 리마스터"가 2억 화소 사진에 한 일(원본·결과 3쌍을 재서 맞춤):
+// 디테일은 새로 그리지 않고 1,600만 화소로 줄이며 밝기·대비·채도만 고쳤다. 여기에 역광 사진에서
+// 얼굴이 어둡게 남는 문제를 고치려고, 그늘진 곳만 밝히고 색을 더 진하게 하는 단계를 더했다("보통" 강도).
+//   1. 레벨: 가장 밝은 (100-p_hi)%를 흰색으로 편다. 어두운 끝(p_lo%)은 밝은 끝이 흰색에서 모자란 만큼만
+//      검정으로 내린다 (뿌연 사진은 대비를 넓히고, 이미 대비가 큰 역광 사진은 그늘을 더 어둡게 만들지 않는다)
+//   2. 그늘 밝히기: 주변(사진 크기의 몇 %)보다 어두운 곳일수록 1-(1-v)^g 곡선으로 밝힌다. 밝은 곳은 그대로
+//   3. 채도: 휘도는 두고 색만 sat배
+const TONE = { p_lo: 0.2, p_hi: 99.5, lift: 1.0, t: 0.55, sat: 1.18 };
+
+function autoTone(px, bands, width, height) {
+  if (bands < 3) return;
+  const { p_lo, p_hi, lift, t, sat } = TONE;
+  const n = width * height;
+  const hist = new Float64Array(256);
+  for (let i = 0; i < px.length; i += bands) { hist[px[i]]++; hist[px[i + 1]]++; hist[px[i + 2]]++; }
+  const pct = p => {
+    const want = n * 3 * p / 100;
+    let acc = 0;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= want) return v; }
+    return 255;
+  };
+  const hi = pct(p_hi), lo = Math.min(pct(p_lo) * Math.min(1, Math.max(0, (255 - hi) / 25)), hi - 1);
+  const lev = new Float32Array(256);
+  for (let v = 0; v < 256; v++) lev[v] = Math.min(1, Math.max(0, (v - lo) / (hi - lo)));
+
+  // 주변 밝기 지도: 16×16 칸 평균 → 상자 흐림 3번 → 픽셀마다 쌍선형 보간
+  const F = 16, sw = Math.max(1, Math.floor(width / F)), sh = Math.max(1, Math.floor(height / F));
+  let map = new Float32Array(sw * sh);
+  for (let y = 0; y < sh * F; y++) {
+    const row = (y / F | 0) * sw;
+    for (let x = 0; x < sw * F; x++) {
+      const i = (y * width + x) * bands;
+      map[row + (x / F | 0)] += 0.299 * lev[px[i]] + 0.587 * lev[px[i + 1]] + 0.114 * lev[px[i + 2]];
+    }
+  }
+  for (let k = 0; k < map.length; k++) map[k] /= F * F;
+  const r = Math.max(1, Math.floor(Math.max(sw, sh) * 0.03));
+  const blur1d = (src, len, count, stride, step) => {  // 가장자리는 끝 값을 이어 쓴다
+    const out = new Float32Array(src.length), k = 2 * r + 1;
+    for (let c = 0; c < count; c++) {
+      const base = c * stride, at = j => src[base + Math.min(len - 1, Math.max(0, j)) * step];
+      let acc = 0;
+      for (let j = -r; j <= r; j++) acc += at(j);
+      for (let j = 0; j < len; j++) { out[base + j * step] = acc / k; acc += at(j + r + 1) - at(j - r); }
+    }
+    return out;
+  };
+  for (let pass = 0; pass < 3; pass++) { map = blur1d(map, sh, sw, 1, sw); map = blur1d(map, sw, sh, sw, 1); }
+
+  // 1-(1-v)^g 표: g = 1 ~ 1+lift 를 128단계로
+  const G = 128, curve = new Float32Array(G * 256);
+  for (let gi = 0; gi < G; gi++) {
+    const g = 1 + lift * gi / (G - 1);
+    for (let v = 0; v < 256; v++) curve[gi * 256 + v] = 1 - Math.pow(1 - lev[v], g);
+  }
+  for (let y = 0; y < height; y++) {
+    const fy = Math.min(sh - 1, Math.max(0, (y + 0.5) / F - 0.5)), y0 = fy | 0, y1 = Math.min(sh - 1, y0 + 1), wy = fy - y0;
+    for (let x = 0; x < width; x++) {
+      const fx = Math.min(sw - 1, Math.max(0, (x + 0.5) / F - 0.5)), x0 = fx | 0, x1 = Math.min(sw - 1, x0 + 1), wx = fx - x0;
+      const B = (map[y0 * sw + x0] * (1 - wx) + map[y0 * sw + x1] * wx) * (1 - wy) + (map[y1 * sw + x0] * (1 - wx) + map[y1 * sw + x1] * wx) * wy;
+      const gi = Math.round(Math.min(1, Math.max(0, (t - B) / t)) * (G - 1)) * 256;
+      const i = (y * width + x) * bands;
+      const rr = curve[gi + px[i]] * 255, gg = curve[gi + px[i + 1]] * 255, bb = curve[gi + px[i + 2]] * 255;
+      const l = 0.299 * rr + 0.587 * gg + 0.114 * bb;
+      px[i] = Math.min(255, Math.max(0, l + (rr - l) * sat + 0.5));
+      px[i + 1] = Math.min(255, Math.max(0, l + (gg - l) * sat + 0.5));
+      px[i + 2] = Math.min(255, Math.max(0, l + (bb - l) * sat + 0.5));
+    }
+  }
+}
+
 function pickScales(w, h, maxScale) {
   const scales = [1.0, ...SCALE_STEPS].filter(x => x <= maxScale);
   // 출력이 너무 작아지는(장변 2000px 미만) 배율은 제외
@@ -78,7 +156,7 @@ function pickScales(w, h, maxScale) {
 }
 
 // scale을 안 주면 원본 크기로 배율 목록을 정하고 첫 배율로 축소한다
-function resize({ data, scale, max_scale, long_edge, sharpen, keep_gps }) {
+function resize({ data, scale, max_scale, long_edge, area_mp, tone, sharpen, keep_gps }) {
   const s = new Scope();
   try {
     // EXIF 회전은 축소한 뒤 메모리에 올린 결과에 반영한다. 순차 읽기 원본을 먼저 돌리면
@@ -89,7 +167,8 @@ function resize({ data, scale, max_scale, long_edge, sharpen, keep_gps }) {
     if (srcW * srcH > MAX_PIXELS) {
       throw new UserError(`3억 화소까지 줄일 수 있어요. 이 사진은 ${(srcW * srcH / 1e8).toFixed(1).replace(/\.0$/, "")}억 화소예요.`);
     }
-    const scales = long_edge ? edgeScales(srcW, srcH, long_edge) : pickScales(srcW, srcH, max_scale);
+    const scales = area_mp ? areaScales(srcW, srcH, area_mp)
+      : long_edge ? edgeScales(srcW, srcH, long_edge) : pickScales(srcW, srcH, max_scale);
     scale ??= scales[0];
 
     // 선형 광(linear light) 공간에서 Lanczos3로 축소한다 (core.py의 _resize와 동일)
@@ -106,12 +185,16 @@ function resize({ data, scale, max_scale, long_edge, sharpen, keep_gps }) {
 
     let out = img;
     if (scale < 1) {
+      // 0.45배보다 많이 줄이면 스레드마다 실수(float) 줄 버퍼를 크게 잡아, 정보량이 큰 2억 화소 사진(34MB)에서
+      // 1GB 힙을 넘긴다(4스레드에서 실패, 3스레드 이하 통과, 속도는 같음). 이 워커는 한 번 쓰고 버리므로 여기서 줄인다.
+      if (scale < 0.45) vips.concurrency(2);
       out = s.add(s.add(s.add(img.colourspace("scrgb")).resize(scale, { kernel: "lanczos3" })).colourspace("srgb"));
     }
     if (sharpen) out = s.add(out.sharpen({ sigma: 0.5, x1: 2, m1: 0, m2: 2 }));
     out = s.add(out.cast("uchar"));
     if (orientation(img) > 1) out = s.add(s.add(out.copyMemory()).autorot());
     const pixels = out.writeToMemory();
+    if (tone) autoTone(pixels, out.bands, out.width, out.height);
     return { srcW, srcH, scales, scale, width: out.width, height: out.height, bands: out.bands, pixels, meta };
   } finally {
     s.free();
@@ -174,13 +257,14 @@ function reencode({ data, sharpen, keep_gps }) {
 // 새 힙에서도 계수 버퍼를 못 잡는 기기(휴대폰 등)면 계수를 버퍼링하지 않는 스트리밍 인코딩으로
 // 바꾼다. 같은 Q에서 파일이 커지므로 이진 탐색을 처음부터 다시 한다.
 let lean = false;
+let chroma420 = false;  // 리마스터: 갤럭시 리마스터 결과처럼 4:2:0 크로마 (용량이 작다)
 class LeanRetry extends Error {}
 
 function encodeOnce(img, q) {
   try {
     return img.jpegsaveBuffer({
       Q: q,
-      subsample_mode: "off",      // 4:4:4 크로마: 빨간색·글자 경계 보존
+      subsample_mode: chroma420 ? "on" : "off",  // 기본 4:4:4 크로마: 빨간색·글자 경계 보존
       optimize_coding: !lean,
       trellis_quant: !lean,       // mozjpeg 최적화
       overshoot_deringing: true,
@@ -233,6 +317,7 @@ function makeViews(s, img, buf) {
 }
 
 function encode({ pixels, width, height, bands, meta, opts, scale, last }) {
+  chroma420 = !!opts.chroma420;
   const s = new Scope();
   const tries = [];
   try {
@@ -264,6 +349,29 @@ function encode({ pixels, width, height, bands, meta, opts, scale, last }) {
   }
 }
 
+// ---------- HDR 게인맵 ----------
+// 원본 게인맵을 결과 사진과 같은 비율로 줄이고, 결과 픽셀을 돌렸으면 같은 방향으로 돌린다.
+// src·out은 화면 방향 기준 가로·세로, orientation은 원본 EXIF 방향값
+function gainmap({ gm, src, out, orientation }) {
+  const s = new Scope();
+  try {
+    let img = s.add(vips.Image.newFromBuffer(gm, ""));
+    const turned = orientation >= 5 && orientation <= 8;
+    const sw = turned ? src.h : src.w, sh = turned ? src.w : src.h;
+    const ow = turned ? out.h : out.w, oh = turned ? out.w : out.h;
+    const tw = Math.max(1, Math.round(img.width * ow / sw)), th = Math.max(1, Math.round(img.height * oh / sh));
+    img = s.add(img.resize(tw / img.width, { vscale: th / img.height, kernel: "lanczos3" }));
+    if (orientation > 1) {
+      img = s.add(img.copyMemory());
+      img.setInt("orientation", orientation);
+      img = s.add(img.autorot());
+    }
+    return { buf: img.jpegsaveBuffer({ Q: 85, keep: 0 }) };
+  } finally {
+    s.free();
+  }
+}
+
 // ---------- 메시지 ----------
 
 onmessage = async ({ data: msg }) => {
@@ -274,6 +382,9 @@ onmessage = async ({ data: msg }) => {
       const transfer = [r.buf.buffer];
       if (r.ref) transfer.push(r.ref.buffer, r.res.buffer, r.preview.buffer);
       postMessage({ type: "done", ...r }, transfer);
+    } else if (msg.op === "gainmap") {
+      const r = gainmap(msg);
+      postMessage({ type: "done", ...r }, [r.buf.buffer]);
     } else if (msg.op === "resize") {
       progress({ phase: "resize", retry: msg.scale !== undefined });
       const r = resize(msg);
