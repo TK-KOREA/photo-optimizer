@@ -1,6 +1,7 @@
 """고해상도 사진 축소 변환 코어.
 
 용도 프리셋으로 동작한다 (브라우저판 docs/app.js의 PRESETS와 같은 값).
+  리마스터     1,600만 화소로 줄이며 밝기·대비·색을 자동 보정 (그늘진 얼굴 밝히기)
   원본 해상도   해상도 그대로 다시 저장해 용량만 줄인다
   고화질 보관   목표 용량(7MB, ±3MB 허용) 안에서 가능한 한 높은 해상도와 품질 (기본)
   카톡·메신저   긴 변 4000px, 4MB 이하
@@ -15,6 +16,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 import struct
 import time
@@ -30,8 +32,10 @@ TOLERANCE_MB = 3.0  # 목표 용량 ± 이 값까지 허용
 SCALE_STEPS = (0.5, 0.45, 0.4, 0.35, 0.3, 0.25)
 
 
-# mode: size = 목표 용량(±3MB), edge = 긴 변 상한 + 용량 상한, original = 해상도 그대로 다시 저장
+# mode: size = 목표 용량(±3MB), edge = 긴 변 상한(또는 화소 수 area_mp) + 용량 상한, original = 해상도 그대로 다시 저장
+# tone: 밝기·대비·채도 자동 보정 (_auto_tone), chroma420: 4:2:0 크로마로 저장 (갤럭시 리마스터 결과와 같은 방식)
 PRESETS = {
+    "remaster":  {"label": "리마스터", "mode": "edge", "area_mp": 16, "max_mb": 8.0, "tone": True, "chroma420": True},
     "original":  {"label": "원본 해상도", "mode": "original"},
     "archive":   {"label": "고화질 보관", "mode": "size", "target_mb": 7.0},
     "messenger": {"label": "카톡·메신저", "mode": "edge", "long_edge": 4000, "max_mb": 4.0},
@@ -58,6 +62,9 @@ class Options:
     preset: str = DEFAULT_PRESET  # 결과 표시용 (직접 설정이면 "custom")
     mode: str = "size"            # size | edge | original
     long_edge: int = 0            # edge 모드의 긴 변 상한(px)
+    area_mp: float = 0            # edge 모드의 화소 수 상한(백만 화소). 주면 long_edge 대신 쓴다
+    tone: bool = False            # 밝기·대비·채도 자동 보정 (리마스터)
+    chroma420: bool = False       # 4:2:0 크로마 (기본은 4:4:4)
 
 
 def preset_options(preset: str = DEFAULT_PRESET, target_mb: float | None = None,
@@ -73,7 +80,9 @@ def preset_options(preset: str = DEFAULT_PRESET, target_mb: float | None = None,
     if p["mode"] == "original":
         return Options(min_mb=0, max_mb=float("inf"), mode="original", **common)
     if p["mode"] == "edge":
-        return Options(min_mb=0, max_mb=p["max_mb"], mode="edge", long_edge=p["long_edge"], **common)
+        return Options(min_mb=0, max_mb=p["max_mb"], mode="edge", long_edge=p.get("long_edge", 0),
+                       area_mp=p.get("area_mp", 0), tone=p.get("tone", False), chroma420=p.get("chroma420", False),
+                       **common)
     lo, hi = target_range(p["target_mb"])
     return Options(min_mb=lo, max_mb=hi, mode="size", **common)
 
@@ -298,13 +307,193 @@ def put_gps(data: bytes, gps: list | None) -> bytes:
     return head + b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body + tail
 
 
+# ---------- HDR 게인맵 (Ultra HDR, docs/jpeg-meta.js의 readGainMap/attachGainMap과 같은 방식) ----------
+# 갤럭시·픽셀의 HDR 사진은 JPEG 뒤에 밝기 배율을 담은 작은 흑백 JPEG(게인맵)를 하나 더 붙인다.
+# 본 사진의 XMP(hdrgm, Container)와 MPF(APP2)가 그 위치를 가리킨다. 엔진은 본 사진만 읽어 쓰므로
+# 게인맵을 따로 꺼내 결과 크기에 맞춰 줄인 뒤 다시 붙인다.
+_MPF_ID = b"MPF\0"
+_ISO_GM_ID = b"urn:iso:std:iso:ts:21496:-1\0"
+
+
+def read_gain_map(data: bytes) -> dict | None:
+    """원본의 {gm: 게인맵 JPEG, xmp: hdrgm XMP 구간, iso: ISO 21496-1 구간 | None}. 없으면 None."""
+    if data[:2] != b"\xff\xd8":
+        return None
+    xmp = iso = gm = None
+    for m, start, end in _segments(data):
+        if m == 0xE1 and data[start:start + len(_XMP_ID)] == _XMP_ID:
+            body = data[start:end]
+            if b"hdrgm:Version" in body and b"GainMap" in body:
+                xmp = data[start - 4:end]
+        elif m == 0xE2 and data[start:start + len(_ISO_GM_ID)] == _ISO_GM_ID:
+            iso = data[start - 4:end]
+        elif m == 0xE2 and data[start:start + 4] == _MPF_ID:
+            tiff = start + 4
+            e = "<" if data[tiff:tiff + 2] == b"II" else ">"
+            try:
+                ifd = tiff + struct.unpack_from(e + "I", data, tiff + 4)[0]
+                for i in range(struct.unpack_from(e + "H", data, ifd)[0]):
+                    tag, _t, count, val = struct.unpack_from(e + "HHII", data, ifd + 2 + i * 12)
+                    if tag == 0xB002 and count >= 32:
+                        size, off = struct.unpack_from(e + "II", data, tiff + val + 16 + 4)  # 두 번째 이미지
+                        if off and tiff + off + size <= len(data):
+                            gm = data[tiff + off:tiff + off + size]
+            except struct.error:
+                pass
+    if not xmp or not gm or gm[:2] != b"\xff\xd8" or b"hdrgm" not in gm[:4096]:
+        return None
+    return {"gm": gm, "xmp": xmp, "iso": iso}
+
+
+def gain_map_meta(gm: bytes) -> list[bytes]:
+    """게인맵 JPEG 자체의 메타데이터 구간(hdrgm XMP, ISO 21496-1). 다시 인코딩한 게인맵에 옮겨 붙인다."""
+    return [gm[start - 4:end] for m, start, end in _segments(gm)
+            if (m == 0xE1 and gm[start:start + len(_XMP_ID)] == _XMP_ID)
+            or (m == 0xE2 and gm[start:start + len(_ISO_GM_ID)] == _ISO_GM_ID)]
+
+
+def insert_segments(data: bytes, segs: list[bytes]) -> bytes:
+    """첫 APP0(JFIF) 뒤(없으면 SOI 뒤)에 구간들을 넣는다."""
+    first = next(_segments(data), None)
+    at = first[2] if first and first[0] == 0xE0 else 2
+    return data[:at] + b"".join(segs) + data[at:]
+
+
+def _app(marker: int, payload: bytes) -> bytes:
+    return bytes((0xFF, marker)) + struct.pack(">H", len(payload) + 2) + payload
+
+
+def _gm_length(text: bytes, n: int) -> bytes:
+    """XMP의 GainMap 항목 길이(Item:Length)를 n으로 바꾼다."""
+    def fix(mt):
+        if mt.group(1):
+            return mt.group(1) + str(n).encode() + mt.group(2)
+        return mt.group(3) + str(n).encode() + mt.group(4)
+    pat = rb'(Item:Semantic="GainMap"[^>]*?Item:Length=")\d+(")|(Item:Length=")\d+("[^>]*?Item:Semantic="GainMap")'
+    return re.sub(pat, fix, text, count=1)
+
+
+def attach_gain_map(primary: bytes, gm: bytes, src: dict | None) -> bytes:
+    """변환 결과(primary)에 게인맵(gm)을 붙여 Ultra HDR JPEG로 만든다. src = read_gain_map(원본)."""
+    if not src or primary[:2] != b"\xff\xd8" or gm[:2] != b"\xff\xd8":
+        return primary
+    # 결과에 남은 옛 hdrgm XMP·MPF·ISO 구간은 빼고 새로 만든다. 다른 XMP가 있으면 겹치므로 손대지 않는다
+    segs = list(_segments(primary))
+    last_app = max([end for m, _s, end in segs if 0xE0 <= m <= 0xEF], default=2)
+    keep = []
+    for m, start, end in segs:
+        if end > last_app:
+            break
+        head = primary[start:start + 40]
+        is_xmp = m == 0xE1 and head.startswith(_XMP_ID)
+        if is_xmp and b"hdrgm" not in primary[start:end]:
+            return primary
+        if not (is_xmp or (m == 0xE2 and (head.startswith(_MPF_ID) or head.startswith(_ISO_GM_ID)))):
+            keep.append(primary[start - 4:end])
+    tail = primary[last_app:]
+
+    xmp = _app(0xE1, _gm_length(src["xmp"][4:], len(gm)))
+    iso = [src["iso"]] if src.get("iso") else []
+
+    # MPF: 이미지 2장(본 사진, 게인맵)의 크기와 위치. 오프셋은 MPF의 TIFF 머리 기준 (리틀엔디언)
+    head = primary[:2] + b"".join(keep)
+    mpf_len = 4 + 4 + 82  # 마커·길이 + "MPF\0" + TIFF
+    before_mpf = len(head) + len(xmp) + sum(len(x) for x in iso)
+    total = before_mpf + mpf_len + len(tail)
+    tiff_abs = before_mpf + 4 + 4
+    tiff = (b"II*\0" + struct.pack("<I", 8) + struct.pack("<H", 3)
+            + struct.pack("<HHI", 0xB000, 7, 4) + b"0100"
+            + struct.pack("<HHII", 0xB001, 4, 1, 2)
+            + struct.pack("<HHII", 0xB002, 7, 32, 50)
+            + struct.pack("<I", 0)
+            + struct.pack("<IIIHH", 0x030000, total, 0, 0, 0)
+            + struct.pack("<IIIHH", 0, len(gm), total - tiff_abs, 0, 0))
+    mpf = _app(0xE2, _MPF_ID + tiff)
+    return head + xmp + b"".join(iso) + mpf + tail + gm
+
+
+def _resize_gain_map(gm: bytes, src_wh: tuple[int, int], out_wh: tuple[int, int], orientation: int) -> bytes:
+    """게인맵을 결과 사진과 같은 비율로 줄이고, 결과 픽셀을 돌렸으면 같은 방향으로 돌린다 (가로·세로는 화면 방향 기준)."""
+    img = pyvips.Image.new_from_buffer(gm, "")
+    turned = orientation in (5, 6, 7, 8)
+    sw, sh = (src_wh[1], src_wh[0]) if turned else src_wh
+    ow, oh = (out_wh[1], out_wh[0]) if turned else out_wh
+    tw, th = max(1, int(img.width * ow / sw + 0.5)), max(1, int(img.height * oh / sh + 0.5))
+    img = img.resize(tw / img.width, vscale=th / img.height, kernel="lanczos3")
+    if orientation > 1:
+        img = img.copy_memory().copy()
+        img.set_type(pyvips.GValue.gint_type, "orientation", orientation)
+        img = img.autorot()
+    return img.jpegsave_buffer(Q=85, keep="none")
+
+
+# ---------- 자동 보정 (리마스터, docs/worker.js의 autoTone과 같은 값) ----------
+# 출발점은 갤럭시 S24 울트라 "사진 리마스터"가 2억 화소 사진에 한 일(원본·결과 3쌍을 재서 맞춤):
+# 디테일은 새로 그리지 않고 1,600만 화소로 줄이며 밝기·대비·채도만 고쳤다. 여기에 역광 사진에서
+# 얼굴이 어둡게 남는 문제를 고치려고, 그늘진 곳만 밝히고 색을 더 진하게 하는 단계를 더했다("보통" 강도).
+#   1. 레벨: 가장 밝은 (100-p_hi)%를 흰색으로 편다. 어두운 끝(p_lo%)은 밝은 끝이 흰색에서 모자란 만큼만
+#      검정으로 내린다 (뿌연 사진은 대비를 넓히고, 이미 대비가 큰 역광 사진은 그늘을 더 어둡게 만들지 않는다)
+#   2. 그늘 밝히기: 주변(사진 크기의 몇 %)보다 어두운 곳일수록 1-(1-v)^g 곡선으로 밝힌다. 밝은 곳은 그대로
+#   3. 채도: 휘도는 두고 색만 sat배
+TONE = {"p_lo": 0.2, "p_hi": 99.5, "lift": 1.0, "t": 0.55, "sat": 1.18}
+_LUMA = [[0.299, 0.587, 0.114]]
+
+
+def _clip01(x: pyvips.Image) -> pyvips.Image:
+    x = (x < 0).ifthenelse(0, x)
+    return (x > 1).ifthenelse(1, x)
+
+
+def _auto_tone(img: pyvips.Image) -> pyvips.Image:
+    """sRGB 8비트 이미지의 밝기·대비·채도를 고친다 (흑백은 그대로)."""
+    if img.bands < 3:
+        return img
+    t = TONE
+    counts = struct.unpack(f"<{256 * img.bands}I", img.hist_find().write_to_memory())  # 256 × 밴드
+    pooled = [sum(counts[v * img.bands + b] for b in range(3)) for v in range(256)]
+    total = sum(pooled)
+
+    def pct(p):
+        want, acc = total * p / 100, 0
+        for v in range(256):
+            acc += pooled[v]
+            if acc >= want:
+                return v
+        return 255
+
+    hi = pct(t["p_hi"])
+    lo = min(pct(t["p_lo"]) * min(1.0, max(0.0, (255 - hi) / 25)), hi - 1)
+    lev = [min(1.0, max(0.0, (v - lo) / (hi - lo))) for v in range(256)]
+    lut = pyvips.Image.new_from_memory(struct.pack("<256f", *lev), 256, 1, 1, "float")
+    x = img.extract_band(0, n=3).maplut(lut)
+
+    # 주변 밝기 지도: 16×16 칸 평균 → 상자 흐림 3번 → 쌍선형으로 다시 키운다
+    f = 16
+    sw, sh = max(1, img.width // f), max(1, img.height // f)
+    small = x.recomb(_LUMA).crop(0, 0, min(img.width, sw * f), min(img.height, sh * f)).shrink(f, f).copy_memory()
+    r = max(1, int(max(sw, sh) * 0.03))
+    mask = pyvips.Image.new_from_list([[1] * (2 * r + 1)], scale=2 * r + 1)
+    for _ in range(3):
+        small = (small.embed(r, r, sw + 2 * r, sh + 2 * r, extend="copy")
+                 .convsep(mask, precision="float").crop(r, r, sw, sh).copy_memory())
+    base = small.resize(f, kernel="linear").embed(0, 0, img.width, img.height, extend="copy")
+
+    gain = _clip01(base * (-1 / t["t"]) + 1) * t["lift"] + 1
+    x = 1 - (1 - x) ** gain
+    lum = x.recomb(_LUMA)
+    out = ((lum + (x - lum) * t["sat"]) * 255 + 0.5).cast("uchar")
+    if img.bands > 3:
+        out = out.bandjoin(img.extract_band(3, n=img.bands - 3))
+    return out.copy(interpretation="srgb")
+
+
 def _load(data: bytes) -> pyvips.Image:
     # EXIF 회전은 _resize가 축소한 뒤 반영한다. 순차 읽기 원본을 먼저 돌리면
     # 줄 순서가 어긋나 축소 없이(배율 1) 읽을 때 실패한다
     return pyvips.Image.new_from_buffer(data, "", access="sequential")
 
 
-def _resize(img: pyvips.Image, scale: float, sharpen: bool) -> pyvips.Image:
+def _resize(img: pyvips.Image, scale: float, sharpen: bool, tone: bool = False) -> pyvips.Image:
     """선형 광(linear light) 공간에서 Lanczos3로 축소한다.
 
     sRGB와 Display P3는 같은 전달 곡선(감마)을 쓰므로 scRGB 변환으로 둘 다
@@ -329,6 +518,8 @@ def _resize(img: pyvips.Image, scale: float, sharpen: bool) -> pyvips.Image:
     out = out.copy_memory()
     if "orientation" in out.get_fields() and out.get("orientation") > 1:
         out = out.autorot().copy_memory()  # EXIF 회전 정보를 실제 픽셀에 반영
+    if tone:
+        out = _auto_tone(out).copy_memory()
     return out
 
 
@@ -340,10 +531,10 @@ def _strip_gps(img: pyvips.Image) -> pyvips.Image:
     return img
 
 
-def _encode(img: pyvips.Image, q: int) -> bytes:
+def _encode(img: pyvips.Image, q: int, chroma420: bool = False) -> bytes:
     return img.jpegsave_buffer(
         Q=q,
-        subsample_mode="off",      # 4:4:4 크로마: 빨간색·글자 경계 보존
+        subsample_mode="on" if chroma420 else "off",  # 기본 4:4:4 크로마: 빨간색·글자 경계 보존
         optimize_coding=True,
         trellis_quant=True,        # mozjpeg 계열 최적화 (지원 시)
         overshoot_deringing=True,
@@ -359,7 +550,7 @@ def _search_q(img: pyvips.Image, opts: Options, tries: list, scale: float):
     best = None
     while lo <= hi:
         q = (lo + hi) // 2
-        buf = _encode(img, q)
+        buf = _encode(img, q, opts.chroma420)
         tries.append({"scale": scale, "q": q, "mb": round(len(buf) / MB, 2)})
         if len(buf) <= limit:
             best = (q, buf)
@@ -415,11 +606,15 @@ def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
     is_jpeg = data[:2] == b"\xff\xd8"
     # 변환 전에 원본의 위치 정보를 메모리에 담아 두고, 변환이 끝나면 결과에 다시 넣는다
     gps = read_gps(data) if opts.keep_gps else None
+    # HDR 사진(게인맵)이면 게인맵도 꺼내 두었다가 결과 크기에 맞춰 다시 붙인다
+    hdr = read_gain_map(data)
 
     # 원본 해상도: 해상도 그대로 다시 저장. 원본 JPEG보다 커지면 원본을 그대로 쓴다
     if opts.mode == "original":
         buf, w, h = _reencode(data, opts)
         buf = put_gps(buf, gps) if opts.keep_gps else scrub_gps(buf)[0]
+        if hdr:  # 해상도·방향이 그대로이므로 원본 게인맵을 그대로 붙인다
+            buf = attach_gain_map(buf, hdr["gm"], hdr)
         if is_jpeg and len(buf) >= len(data):
             return _keep_original(data, opts, t0)
         return buf, Result(width=w, height=h, src_width=w, src_height=h, quality=REENCODE_Q, size=len(buf),
@@ -428,16 +623,20 @@ def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
 
     # 이미 용량 상한 안의 JPEG는 다시 압축하지 않는다. 긴 변 프리셋도 마찬가지다: 상한 안이면
     # 원본이 같은 용량에 해상도가 더 높다
+    # 자동 보정(리마스터)은 색이 바뀌므로 원본을 그대로 돌려주지 않는다
     small = len(data) <= opts.max_mb * MB
-    if small and is_jpeg:
+    if small and is_jpeg and not opts.tone:
         return _keep_original(data, opts, t0)
 
     src = _load(data)
     src_w, src_h = _oriented_size(src)
 
     if opts.mode == "edge":
-        # 긴 변을 long_edge 이하로. 상한을 못 맞추면 85%, 70%로 한 단계씩 더 줄인다
-        s = min(1.0, opts.long_edge / max(src_w, src_h))
+        # 긴 변을 long_edge 이하로(또는 화소 수를 area_mp 이하로). 상한을 못 맞추면 85%, 70%로 한 단계씩 더 줄인다
+        if opts.area_mp:
+            s = min(1.0, math.sqrt(opts.area_mp * 1e6 / (src_w * src_h)))
+        else:
+            s = min(1.0, opts.long_edge / max(src_w, src_h))
         scales = [s, s * 0.85, s * 0.7]
     else:
         # JPEG가 아니어도 이미 상한 안이면 해상도를 줄이지 않고 원래 크기부터 시작한다
@@ -450,7 +649,7 @@ def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
     found = None
     for i, scale in enumerate(scales):
         # sequential 접근 이미지는 한 번만 읽을 수 있어 배율마다 다시 연다
-        img = _resize(src if i == 0 else _load(data), scale, opts.sharpen)
+        img = _resize(src if i == 0 else _load(data), scale, opts.sharpen, opts.tone)
         if not opts.keep_gps:
             img = _strip_gps(img)
         found = _search_q(img, opts, tries, scale)
@@ -464,13 +663,21 @@ def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
             note = "최고 품질로도 목표보다 3MB 넘게 작습니다 (원본 정보량이 적은 사진)"
     else:
         # 최소 배율에서도 상한 초과: 최소 배율 + 최저 Q로 저장
-        q, buf = opts.min_q, _encode(img, opts.min_q)
+        q, buf = opts.min_q, _encode(img, opts.min_q, opts.chroma420)
         note = "목표 상한을 넘었습니다 (최소 해상도·최저 품질 적용)"
     if opts.keep_gps:
         buf = put_gps(buf, gps)
     else:
         buf, _ = scrub_gps(buf)  # 엔진은 EXIF GPS만 지우므로 XMP의 GPS도 지운다
-    if is_jpeg and len(buf) >= len(data):  # 그래도 원본보다 크면 원본을 그대로 쓴다
+    if hdr:
+        try:
+            orientation = src.get("orientation") if "orientation" in src.get_fields() else 1
+            gm = _resize_gain_map(hdr["gm"], (src_w, src_h), (img.width, img.height), orientation)
+            buf = attach_gain_map(buf, insert_segments(gm, gain_map_meta(hdr["gm"])), hdr)
+        except pyvips.Error:
+            pass  # 게인맵이 없어도 사진은 정상
+    # 그래도 원본보다 크면 원본을 그대로 쓴다 (자동 보정은 색이 바뀌었으므로 제외)
+    if is_jpeg and not opts.tone and len(buf) >= len(data):
         return _keep_original(data, opts, t0)
 
     result = Result(

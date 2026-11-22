@@ -53,7 +53,7 @@ def api_presets():
 @app.post("/api/convert")
 async def api_convert(
     file: UploadFile = File(...),
-    preset: str = Form(DEFAULT_PRESET),          # original | archive | messenger | mail | custom
+    preset: str = Form(DEFAULT_PRESET),          # remaster | original | archive | messenger | mail | custom
     target_mb: float = Form(DEFAULT_TARGET_MB),  # preset=custom일 때만 쓴다
     sharpen: bool = Form(False),
     keep_gps: bool = Form(True),
