@@ -176,6 +176,128 @@ def scrub_gps(data: bytes) -> tuple[bytes, bool]:
     return (bytes(b), True) if removed else (data, False)
 
 
+# ---------- 위치 정보 옮겨 심기 (docs/jpeg-meta.js의 readGps/putGps와 같은 방식) ----------
+# 변환 엔진이 메타데이터를 다시 쓰는 과정에서 GPS를 잃을 때가 있다. 그래서 변환 전에 원본의
+# GPS IFD를 읽어 메모리에 담아 두고, 변환이 끝난 JPEG에 다시 넣는다.
+# 값은 엔디언과 무관하게 빅엔디언 바이트로 담아, 결과 파일의 엔디언에 맞춰 다시 쓴다.
+
+def _unit(t: int) -> int:
+    return 4 if t in (5, 10) else _TYPE_SIZE.get(t, 1)
+
+
+def _swap(raw: bytes, unit: int) -> bytes:
+    if unit == 1:
+        return raw
+    return b"".join(raw[k:k + unit][::-1] for k in range(0, len(raw), unit))
+
+
+def _exif_segment(b: bytes):
+    for m, start, end in _segments(b):
+        if m == 0xE1 and b[start:start + 6] == b"Exif\0\0":
+            return start, end
+    return None
+
+
+def read_gps(data: bytes) -> list | None:
+    """원본의 GPS 항목들 [(tag, type, count, 빅엔디언 값 바이트)]. 없으면 None."""
+    if data[:2] != b"\xff\xd8":
+        return None
+    seg = _exif_segment(data)
+    if not seg:
+        return None
+    start, end = seg
+    tiff = start + 6
+    e = "<" if data[tiff:tiff + 2] == b"II" else ">"
+    r16 = lambda o: struct.unpack_from(e + "H", data, o)[0]
+    r32 = lambda o: struct.unpack_from(e + "I", data, o)[0]
+    try:
+        ifd0 = tiff + r32(tiff + 4)
+        ptr = next((ifd0 + 2 + i * 12 for i in range(r16(ifd0)) if r16(ifd0 + 2 + i * 12) == 0x8825), None)
+        if ptr is None:
+            return None
+        gps = tiff + r32(ptr + 8)
+        out = []
+        for j in range(r16(gps)):
+            g = gps + 2 + j * 12
+            if g + 12 > end:
+                break
+            t, count = r16(g + 2), r32(g + 4)
+            if t not in _TYPE_SIZE:
+                continue
+            size = _TYPE_SIZE[t] * count
+            frm = g + 8 if size <= 4 else tiff + r32(g + 8)
+            if frm + size > end:
+                continue
+            raw = data[frm:frm + size]
+            out.append((r16(g), t, count, _swap(raw, _unit(t)) if e == "<" else raw))
+        return out or None
+    except struct.error:
+        return None
+
+
+def _gps_ifd(gps: list, offset: int, e: str) -> bytes:
+    items = sorted(gps)
+    data_at = offset + 2 + len(items) * 12 + 4
+    head, extra = [struct.pack(e + "H", len(items))], []
+    for tag, t, count, raw in items:
+        raw = _swap(raw, _unit(t)) if e == "<" else raw
+        head.append(struct.pack(e + "HHI", tag, t, count))
+        if len(raw) <= 4:
+            head.append(raw.ljust(4, b"\0"))
+        else:
+            head.append(struct.pack(e + "I", data_at))
+            pad = b"\0" * (len(raw) & 1)  # 오프셋은 짝수로 맞춘다
+            extra.append(raw + pad)
+            data_at += len(raw) + len(pad)
+    head.append(struct.pack(e + "I", 0))
+    return b"".join(head + extra)
+
+
+def put_gps(data: bytes, gps: list | None) -> bytes:
+    """변환 결과에 GPS를 넣는다. 이미 있으면 원본 값으로 바꾼다.
+
+    기존 EXIF 내용은 그대로 두고 끝에 새 IFD0(GPS 항목 포함)과 GPS IFD를 덧붙인 뒤
+    머리의 IFD0 위치만 바꾼다. 그래서 다른 항목의 오프셋은 하나도 움직이지 않는다.
+    """
+    if not gps or data[:2] != b"\xff\xd8":
+        return data
+    seg = _exif_segment(data)
+    if seg:
+        start, end = seg
+        tiff = start + 6
+        e = "<" if data[tiff:tiff + 2] == b"II" else ">"
+        try:
+            ifd0 = tiff + struct.unpack_from(e + "I", data, tiff + 4)[0]
+            n = struct.unpack_from(e + "H", data, ifd0)[0]
+        except struct.error:
+            return data
+        if ifd0 + 2 + n * 12 + 4 > end:
+            return data
+        entries = [data[ifd0 + 2 + i * 12:ifd0 + 14 + i * 12] for i in range(n)]
+        entries = [x for x in entries if struct.unpack_from(e + "H", x)[0] != 0x8825]
+        base = end - tiff
+        pad = base & 1
+        base += pad
+        gps_at = base + 2 + (len(entries) + 1) * 12 + 4
+        entries.append(struct.pack(e + "HHII", 0x8825, 4, 1, gps_at))
+        entries.sort(key=lambda x: struct.unpack_from(e + "H", x)[0])
+        nxt = data[ifd0 + 2 + n * 12:ifd0 + 6 + n * 12]  # 다음 IFD(썸네일) 위치
+        old = bytearray(data[start:end])
+        struct.pack_into(e + "I", old, 10, base)  # 머리의 IFD0 위치
+        body = bytes(old) + b"\0" * pad + struct.pack(e + "H", len(entries)) + b"".join(entries) + nxt \
+            + _gps_ifd(gps, gps_at, e)
+        head, tail = data[:start - 4], data[end:]
+    else:
+        # EXIF가 아예 없으면 GPS만 담은 EXIF를 새로 만든다 (JFIF APP0 뒤, 없으면 SOI 뒤)
+        body = b"Exif\0\0MM\0*" + struct.pack(">IHHHIII", 8, 1, 0x8825, 4, 1, 26, 0) + _gps_ifd(gps, 26, ">")
+        first = next(_segments(data), None)
+        at = first[2] if first and first[0] == 0xE0 else 2
+        head, tail = data[:at], data[at:]
+    if len(body) + 2 > 0xFFFF:
+        return data  # APP1 한 구간에 다 들어가지 않으면 손대지 않는다
+    return head + b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body + tail
+
+
 def _load(data: bytes) -> pyvips.Image:
     # EXIF 회전은 _resize가 축소한 뒤 반영한다. 순차 읽기 원본을 먼저 돌리면
     # 줄 순서가 어긋나 축소 없이(배율 1) 읽을 때 실패한다
@@ -295,8 +417,7 @@ def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
     # 원본 해상도: 해상도 그대로 다시 저장. 원본 JPEG보다 커지면 원본을 그대로 쓴다
     if opts.mode == "original":
         buf, w, h = _reencode(data, opts)
-        if not opts.keep_gps:
-            buf, _ = scrub_gps(buf)
+        buf = put_gps(buf, gps) if opts.keep_gps else scrub_gps(buf)[0]
         if is_jpeg and len(buf) >= len(data):
             return _keep_original(data, opts, t0)
         return buf, Result(width=w, height=h, src_width=w, src_height=h, quality=REENCODE_Q, size=len(buf),
@@ -343,7 +464,9 @@ def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
         # 최소 배율에서도 상한 초과: 최소 배율 + 최저 Q로 저장
         q, buf = opts.min_q, _encode(img, opts.min_q)
         note = "목표 상한을 넘었습니다 (최소 해상도·최저 품질 적용)"
-    if not opts.keep_gps:
+    if opts.keep_gps:
+        buf = put_gps(buf, gps)
+    else:
         buf, _ = scrub_gps(buf)  # 엔진은 EXIF GPS만 지우므로 XMP의 GPS도 지운다
     if is_jpeg and len(buf) >= len(data):  # 그래도 원본보다 크면 원본을 그대로 쓴다
         return _keep_original(data, opts, t0)

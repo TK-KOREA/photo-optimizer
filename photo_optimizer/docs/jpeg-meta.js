@@ -98,3 +98,137 @@ export function scrubGps(input) {
   }
   return { bytes: removed ? u8 : input, removed };
 }
+
+// ---------- 위치 정보 옮겨 심기 ----------
+// 변환 엔진이 메타데이터를 다시 쓰는 과정에서 GPS를 잃을 때가 있다. 그래서 변환 전에 원본의
+// GPS IFD를 읽어 메모리에 담아 두고(readGps), 변환이 끝난 JPEG에 다시 넣는다(putGps).
+// 값은 엔디언과 무관하게 빅엔디언 바이트로 담아, 결과 파일의 엔디언에 맞춰 다시 쓴다.
+
+// 한 원소의 바이트 수 (RATIONAL은 4바이트 둘이라 4바이트씩 뒤집는다)
+const unitSize = type => (type === 5 || type === 10 ? 4 : TYPE_SIZE[type] || 1);
+
+function exifSegment(u8) {
+  for (const s of segments(u8)) {
+    if (s.marker === 0xe1 && latin1(u8, s.start, s.start + 6) === "Exif\0\0") return s;
+  }
+  return null;
+}
+
+// 원본의 GPS 항목들 [{ tag, type, count, bytes }] (없으면 null)
+export function readGps(u8) {
+  if (!isJpeg(u8)) return null;
+  const s = exifSegment(u8);
+  if (!s) return null;
+  const tiff = s.start + 6, e = findTag(u8, tiff, s.end, 0x8825);
+  if (e < 0) return null;
+  const le = u8[tiff] === 0x49, { r16, r32 } = tiffReader(u8, tiff);
+  const gps = tiff + r32(e + 8);
+  if (gps + 2 > s.end) return null;
+  const out = [];
+  for (let j = 0, n = r16(gps); j < n; j++) {
+    const g = gps + 2 + j * 12;
+    if (g + 12 > s.end) break;
+    const type = r16(g + 2), count = r32(g + 4);
+    if (!TYPE_SIZE[type]) continue;
+    const size = TYPE_SIZE[type] * count;
+    const from = size <= 4 ? g + 8 : tiff + r32(g + 8);
+    if (from + size > s.end) continue;
+    const bytes = u8.slice(from, from + size);
+    const u = unitSize(type);
+    if (le && u > 1) for (let k = 0; k < size; k += u) bytes.subarray(k, k + u).reverse();
+    out.push({ tag: r16(g), type, count, bytes });
+  }
+  return out.length ? out : null;
+}
+
+// TIFF 조각을 쓰는 도구 (le = 리틀엔디언)
+function tiffWriter(le) {
+  const bytes = [];
+  const w16 = v => (le ? bytes.push(v & 255, v >> 8 & 255) : bytes.push(v >> 8 & 255, v & 255));
+  const w32 = v => (le ? bytes.push(v & 255, v >> 8 & 255, v >> 16 & 255, v >>> 24)
+                       : bytes.push(v >>> 24, v >> 16 & 255, v >> 8 & 255, v & 255));
+  return { bytes, w16, w32 };
+}
+
+// GPS IFD를 offset(TIFF 머리 기준) 위치에 놓을 바이트로 만든다
+function gpsIfd(gps, offset, le) {
+  const w = tiffWriter(le);
+  const list = [...gps].sort((a, b) => a.tag - b.tag);
+  let data = offset + 2 + list.length * 12 + 4;
+  const extra = [];
+  w.w16(list.length);
+  for (const g of list) {
+    const b = g.bytes.slice(), u = unitSize(g.type);
+    if (le && u > 1) for (let k = 0; k < b.length; k += u) b.subarray(k, k + u).reverse();
+    w.w16(g.tag); w.w16(g.type); w.w32(g.count);
+    if (b.length <= 4) { w.bytes.push(...b); for (let k = b.length; k < 4; k++) w.bytes.push(0); }
+    else {
+      w.w32(data);
+      extra.push(...b);
+      if (b.length & 1) extra.push(0);  // 오프셋은 짝수로 맞춘다
+      data += b.length + (b.length & 1);
+    }
+  }
+  w.w32(0);
+  w.bytes.push(...extra);
+  return w.bytes;
+}
+
+// 변환 결과에 GPS를 넣는다. 이미 있으면 메모리에 담아 둔 원본 값으로 바꾼다.
+// 기존 EXIF 내용은 그대로 두고 끝에 새 IFD0(GPS 항목 포함)과 GPS IFD를 덧붙인 뒤
+// 머리의 IFD0 위치만 바꾼다. 그래서 다른 항목의 오프셋은 하나도 움직이지 않는다.
+export function putGps(u8, gps) {
+  if (!gps?.length || !isJpeg(u8)) return u8;
+  const s = exifSegment(u8);
+  let head, tail, seg;
+  if (s) {
+    const tiff = s.start + 6, le = u8[tiff] === 0x49, { r16, r32 } = tiffReader(u8, tiff);
+    const ifd0 = tiff + r32(tiff + 4);
+    if (ifd0 + 2 > s.end) return u8;
+    const n = r16(ifd0);
+    if (ifd0 + 2 + n * 12 + 4 > s.end) return u8;
+    const entries = [];
+    for (let i = 0; i < n; i++) {
+      const e = ifd0 + 2 + i * 12;
+      if (r16(e) !== 0x8825) entries.push({ tag: r16(e), raw: u8.subarray(e, e + 12) });
+    }
+    let base = s.end - tiff;
+    const pad = base & 1;
+    base += pad;
+    const gpsAt = base + 2 + (entries.length + 1) * 12 + 4;
+    const w = tiffWriter(le);
+    const ptr = tiffWriter(le);
+    ptr.w16(0x8825); ptr.w16(4); ptr.w32(1); ptr.w32(gpsAt);
+    entries.push({ tag: 0x8825, raw: ptr.bytes });
+    entries.sort((a, b) => a.tag - b.tag);
+    for (let k = 0; k < pad; k++) w.bytes.push(0);
+    w.w16(entries.length);
+    for (const e of entries) w.bytes.push(...e.raw);
+    w.bytes.push(...u8.subarray(ifd0 + 2 + n * 12, ifd0 + 2 + n * 12 + 4));  // 다음 IFD(썸네일) 위치
+    w.bytes.push(...gpsIfd(gps, gpsAt, le));
+    const old = u8.subarray(s.start, s.end).slice();
+    const at = tiffWriter(le); at.w32(base);
+    old.set(at.bytes, 6 + 4);  // 머리의 IFD0 위치
+    seg = new Uint8Array(old.length + w.bytes.length);
+    seg.set(old); seg.set(w.bytes, old.length);
+    head = u8.subarray(0, s.start - 4); tail = u8.subarray(s.end);
+  } else {
+    // EXIF가 아예 없으면 GPS만 담은 EXIF를 새로 만든다 (JFIF APP0 뒤, 없으면 SOI 뒤)
+    const w = tiffWriter(false);
+    w.bytes.push(0x45, 0x78, 0x69, 0x66, 0, 0, 0x4d, 0x4d, 0, 42); w.w32(8);
+    w.w16(1); w.w16(0x8825); w.w16(4); w.w32(1); w.w32(26); w.w32(0);
+    w.bytes.push(...gpsIfd(gps, 26, false));
+    seg = Uint8Array.from(w.bytes);
+    let at = 2;
+    for (const t of segments(u8)) { if (t.marker === 0xe0) at = t.end; break; }
+    head = u8.subarray(0, at); tail = u8.subarray(at);
+  }
+  const len = seg.length + 2;
+  if (len > 0xffff) return u8;  // APP1 한 구간에 다 들어가지 않으면 손대지 않는다
+  const out = new Uint8Array(head.length + 4 + seg.length + tail.length);
+  out.set(head);
+  out.set([0xff, 0xe1, len >> 8, len & 255], head.length);
+  out.set(seg, head.length + 4);
+  out.set(tail, head.length + 4 + seg.length);
+  return out;
+}

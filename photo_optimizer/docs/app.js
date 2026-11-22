@@ -1,6 +1,6 @@
 // 화면 처리. 변환은 worker.js가 이 기기 안에서 한다.
 // ?v= 는 index.html의 버전과 맞춘다 (캐시에 남은 옛 파일과 섞이지 않게)
-import { isJpeg, jpegInfo, scrubGps } from "./jpeg-meta.js?v=20";
+import { isJpeg, jpegInfo, scrubGps, readGps, putGps } from "./jpeg-meta.js?v=21";
 const $ = id => document.getElementById(id);
 const MB = 1048576;
 const TOL = 3;  // 목표 용량 ± 허용 오차 (MB)
@@ -253,6 +253,9 @@ async function convert(it, opts) {
   const seconds = () => Math.round((performance.now() - t0) / 1000);
   const data = new Uint8Array(await it.file.arrayBuffer());
   const gpsIn = scrubGps(data).removed;
+  // 변환 전에 원본의 위치 정보를 메모리에 담아 두고, 변환이 끝나면 결과에 다시 넣는다
+  const gps = opts.keep_gps ? readGps(data) : null;
+  const withGps = buf => (gps ? putGps(buf, gps) : buf);
   const onMsg = m => progress(it, m);
   // 원본을 그대로 돌려줄 때: 위치 정보 지우기가 켜져 있으면 픽셀은 그대로 두고 GPS만 지운다
   const keepOriginal = info => {
@@ -265,7 +268,7 @@ async function convert(it, opts) {
   if (opts.mode === "original") {
     const input = data.slice();
     const r = await step({ op: "reencode", data: input, sharpen: opts.sharpen, keep_gps: opts.keep_gps }, [input.buffer], onMsg);
-    const buf = opts.keep_gps ? r.buf : scrubGps(r.buf).bytes;
+    const buf = opts.keep_gps ? withGps(r.buf) : scrubGps(r.buf).bytes;
     if (isJpeg(data) && buf.length >= data.length) return keepOriginal({ w: r.srcW, h: r.srcH });
     it.src = it.out = { w: r.srcW, h: r.srcH };
     return { found: { q: r.q, buf }, gpsIn, preview: r.preview, ref: r.ref, res: r.res, seconds: seconds() };
@@ -298,7 +301,7 @@ async function convert(it, opts) {
     if (enc.found || last) break;
   }
   // 엔진은 EXIF의 GPS만 지운다. XMP에 들어 있는 GPS(라이트룸 등에서 내보낸 사진)도 지운다.
-  if (enc.found && !opts.keep_gps) enc.found.buf = scrubGps(enc.found.buf).bytes;
+  if (enc.found) enc.found.buf = opts.keep_gps ? withGps(enc.found.buf) : scrubGps(enc.found.buf).bytes;
   // 그래도 원본보다 크면 원본을 그대로 쓴다
   if (enc.found && isJpeg(data) && enc.found.buf.length >= data.length) {
     const info = jpegInfo(data);
