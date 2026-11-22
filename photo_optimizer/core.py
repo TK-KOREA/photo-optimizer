@@ -413,6 +413,8 @@ def convert(data: bytes, opts: Options | None = None) -> tuple[bytes, Result]:
     opts = opts or Options()
     t0 = time.perf_counter()
     is_jpeg = data[:2] == b"\xff\xd8"
+    # 변환 전에 원본의 위치 정보를 메모리에 담아 두고, 변환이 끝나면 결과에 다시 넣는다
+    gps = read_gps(data) if opts.keep_gps else None
 
     # 원본 해상도: 해상도 그대로 다시 저장. 원본 JPEG보다 커지면 원본을 그대로 쓴다
     if opts.mode == "original":
